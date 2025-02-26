@@ -1,195 +1,230 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
-import "../nft/NFTi.sol";
 import "../governance/AdminControl.sol";
 
 contract PropertyMarket is ReentrancyGuard {
-    using SafeMath for uint256;
-
-    // ========== 交易类型定义 ========== 
-    enum ListingType { ForSale, ForRent }
-    enum PaymentCurrency { LIFE, ETH, USDT }
-
-    // ========== 房产挂牌结构体 ==========
+    // ========== 数据结构 ==========
+    enum PropertyStatus { LISTED, RENTED, SOLD, DELISTED }
+    
     struct PropertyListing {
+        uint256 tokenId;
         address seller;
         uint256 price;
-        ListingType listingType;
-        PaymentCurrency currency;
-        bool isActive;
-        uint256 LLCId; // 法律实体ID
+        address paymentToken;
+        PropertyStatus status;
+        uint256 listTimestamp;
+        uint256 lastRenewed;
     }
 
     // ========== 状态变量 ==========
-    NFTi public immutable nftiContract;  // 资产NFT合约
-    AdminControl public adminControl;    // 管理控制合约
-    IERC20 public immutable lifeToken;   // LIFE代币
-    IERC20 public immutable usdtToken;   // USDT稳定币
-
-    mapping(uint256 => PropertyListing) public listings;      // NFTID => 挂牌信息
-    mapping(address => bool) public verifiedWallets;          // KYC认证名单
+    AdminControl public immutable adminControl;
+    IERC721 public immutable nftiContract;
+    IERC721 public immutable nftmContract;
+    
+    mapping(uint256 => PropertyListing) public listings;
+    mapping(address => mapping(uint256 => uint256)) public leaseTerms;
 
     // ========== 事件定义 ==========
-    event PropertyListed(
+    event NewListing(
         uint256 indexed tokenId,
+        address indexed seller,
         uint256 price,
-        ListingType lType,
-        PaymentCurrency currency
+        address paymentToken
     );
+    
     event PropertySold(
         uint256 indexed tokenId,
         address buyer,
-        address seller,
-        uint256 finalPrice
+        uint256 price,
+        address paymentToken
     );
-    event KycVerified(address indexed wallet, bool status);
+    
+    event ListingUpdated(
+        uint256 indexed tokenId,
+        uint256 newPrice,
+        address newPaymentToken
+    );
 
     // ========== 构造函数 ==========
     constructor(
-        address _nfti,
-        address _admin,
-        address _lifeToken,
-        address _usdtToken
+        address _adminControl,
+        address _nftiAddress,
+        address _nftmAddress
     ) {
-        nftiContract = NFTi(_nfti);
-        adminControl = AdminControl(_admin);
-        lifeToken = IERC20(_lifeToken);
-        usdtToken = IERC20(_usdtToken);
+        adminControl = AdminControl(_adminControl);
+        nftiContract = IERC721(_nftiAddress);
+        nftmContract = IERC721(_nftmAddress);
     }
 
-    // ========== 核心交易函数 ==========
-
-    /**
-     * @dev 挂牌房产（需持有NFTi并通过KYC）
-     */
+    // ========== 核心功能 ==========
     function listProperty(
         uint256 tokenId,
         uint256 price,
-        ListingType lType,
-        PaymentCurrency currency,
-        uint256 LLCId
-    ) external {
-        require(nftiContract.ownerOf(tokenId) == msg.sender, "Not NFT owner");
-        require(verifiedWallets[msg.sender], "KYC verification required");
+        address paymentToken
+    ) external nonReentrant {
+        require(
+            nftiContract.ownerOf(tokenId) == msg.sender,
+            "Not NFTi owner"
+        );
+        
+        require(
+            adminControl.isKYCVerified(msg.sender),
+            "KYC required"
+        );
+        
+        require(price > 0, "Invalid price");
 
         listings[tokenId] = PropertyListing({
+            tokenId: tokenId,
             seller: msg.sender,
             price: price,
-            listingType: lType,
-            currency: currency,
-            isActive: true,
-            LLCId: LLCId
+            paymentToken: paymentToken,
+            status: PropertyStatus.LISTED,
+            listTimestamp: block.timestamp,
+            lastRenewed: block.timestamp
         });
 
-        emit PropertyListed(tokenId, price, lType, currency);
+        emit NewListing(tokenId, msg.sender, price, paymentToken);
     }
 
-    /**
-     * @dev 使用ETH购买房产
-     */
-    function buyWithETH(uint256 tokenId)
-        external
-        payable
-        nonReentrant
-        onlyVerified
-    {
-        PropertyListing memory listing = listings[tokenId];
-        require(listing.isActive, "Listing not active");
-        require(listing.currency == PaymentCurrency.ETH, "Currency mismatch");
-
-        (uint256 tradeFee, ) = adminControl.getFeeConfig();
-        uint256 requiredValue = listing.price.add(
-            listing.price.mul(tradeFee).div(10000)
-        );
+    function purchaseProperty(
+        uint256 tokenId,
+        uint256 offerPrice
+    ) external payable nonReentrant {
+        PropertyListing storage listing = listings[tokenId];
         
-        require(msg.value >= requiredValue, "Insufficient payment");
-
-        // 分发资金
-        uint256 sellerAmount = listing.price;
-        uint256 feeAmount = requiredValue.sub(sellerAmount);
-        
-        payable(listing.seller).transfer(sellerAmount);
-        payable(address(adminControl)).transfer(feeAmount);
-
-        // 转移NFT
-        _transferNFT(listing.seller, msg.sender, tokenId);
-        
-        emit PropertySold(tokenId, msg.sender, listing.seller, listing.price);
-    }
-
-    /**
-     * @dev 使用ERC20代币购买房产
-     */
-    function buyWithERC20(uint256 tokenId) external nonReentrant onlyVerified {
-        PropertyListing memory listing = listings[tokenId];
-        require(listing.isActive, "Listing not active");
-        require(listing.currency != PaymentCurrency.ETH, "Use ETH method");
-
-        IERC20 token = (listing.currency == PaymentCurrency.LIFE) 
-            ? lifeToken 
-            : usdtToken;
-
-        (uint256 tradeFee, ) = adminControl.getFeeConfig();
-        uint256 totalAmount = listing.price.add(
-            listing.price.mul(tradeFee).div(10000)
-        );
-
-        // 转账代币
         require(
-            token.transferFrom(msg.sender, address(this), totalAmount),
+            listing.status == PropertyStatus.LISTED,
+            "Not available"
+        );
+        
+        require(
+            adminControl.isKYCVerified(msg.sender),
+            "KYC required"
+        );
+        
+        require(
+            _validatePayment(listing.price, offerPrice, listing.paymentToken),
             "Payment failed"
         );
-        
-        // 分配资金：给卖家的金额+手续费
-        token.transfer(listing.seller, listing.price);
-        token.transfer(address(adminControl), totalAmount.sub(listing.price));
 
-        // 转移NFT
-        _transferNFT(listing.seller, msg.sender, tokenId);
+        _processPayment(
+            listing.seller,
+            listing.price,
+            listing.paymentToken
+        );
+
+        nftiContract.transferFrom(
+            listing.seller,
+            msg.sender,
+            tokenId
+        );
+        listing.status = PropertyStatus.SOLD;
         
-        emit PropertySold(tokenId, msg.sender, listing.seller, listing.price);
+        emit PropertySold(
+            tokenId,
+            msg.sender,
+            listing.price,
+            listing.paymentToken
+        );
     }
 
-    // ========== 管理功能 ==========
-
-    /**
-     * @dev 设置KYC认证状态（仅管理员）
-     */
-    function setKycStatus(address[] calldata wallets, bool status) external onlyAdmin {
-        for (uint256 i = 0; i < wallets.length; i++) {
-            verifiedWallets[wallets[i]] = status;
-            emit KycVerified(wallets[i], status);
+    // ========== 支付处理函数 ==========
+    function _validatePayment(
+        uint256 listedPrice,
+        uint256 offerPrice,
+        address paymentToken
+    ) private view returns (bool) {
+        if (paymentToken == address(0)) {
+            return msg.value >= listedPrice && offerPrice == listedPrice;
+        } else {
+            return offerPrice == listedPrice;
         }
     }
 
-    // ========== 内部函数 ==========
-    
-    /**
-     * @dev 安全转移NFT
-     */
-    function _transferNFT(address from, address to, uint256 tokenId) internal {
-        nftiContract.safeTransferFrom(from, to, tokenId);
-        delete listings[tokenId]; // 下架房产
+    function _processPayment(
+        address seller,
+        uint256 price,
+        address paymentToken
+    ) internal {
+        (uint256 baseFee,, address feeCollector) = adminControl.feeConfig();
+        uint256 fees = (price * baseFee) / 10000;
+        uint256 netValue = price - fees;
+
+        if (paymentToken == address(0)) {
+            require(msg.value >= price, "Insufficient ETH");
+            
+            if (msg.value > price) {
+                payable(msg.sender).transfer(msg.value - price);
+            }
+            
+            payable(seller).transfer(netValue);
+            payable(feeCollector).transfer(fees);
+        } else {
+            IERC20 token = IERC20(paymentToken);
+            require(
+                token.transferFrom(msg.sender, seller, netValue),
+                "Transfer failed"
+            );
+            require(
+                token.transferFrom(msg.sender, feeCollector, fees),
+                "Fee transfer failed"
+            );
+        }
     }
 
-    // ========== 修饰符 ==========
-    
-    modifier onlyAdmin() {
+    // ========== 管理功能 ==========
+    function updateListing(
+        uint256 tokenId,
+        uint256 newPrice,
+        address newPaymentToken
+    ) external onlyOperator {
+        PropertyListing storage listing = listings[tokenId];
         require(
-            msg.sender == adminControl.owner() ||
-            msg.sender == adminControl.operator(),
-            "Admin access required"
+            listing.status == PropertyStatus.LISTED,
+            "Not active listing"
+        );
+
+        listing.price = newPrice;
+        listing.paymentToken = newPaymentToken;
+        listing.lastRenewed = block.timestamp;
+
+        emit ListingUpdated(tokenId, newPrice, newPaymentToken);
+    }
+
+    // ========== 权限修饰符 ==========
+    modifier onlyOperator() {
+        bytes32 role = adminControl.OPERATOR_ROLE();
+        require(
+            adminControl.hasRole(role, msg.sender),
+            "Operator required"
         );
         _;
     }
 
-    modifier onlyVerified() {
-        require(verifiedWallets[msg.sender], "KYC verification required");
-        _;
+    // ========== 辅助功能 ==========
+    function getListingDetails(uint256 tokenId)
+        external
+        view
+        returns (
+            address seller,
+            uint256 price,
+            address paymentToken,
+            PropertyStatus status,
+            uint256 listTimestamp
+        )
+    {
+        PropertyListing storage listing = listings[tokenId];
+        return (
+            listing.seller,
+            listing.price,
+            listing.paymentToken,
+            listing.status,
+            listing.listTimestamp
+        );
     }
 }

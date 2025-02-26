@@ -1,131 +1,179 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/Strings.sol";
-import "@openzeppelin/contracts/utils/Counters.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
-interface IAdminControl {
-    function isAdmin(address) external view returns (bool);
-    function isLegalAuthority(address) external view returns (bool);
-    function isMinter(address) external view returns (bool);
-}
+contract AdminControl is AccessControl, Pausable {
+    using EnumerableSet for EnumerableSet.AddressSet;
+    
+    // ========== 角色权限定义 ==========
+    bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
+    bytes32 public constant LEGAL_ROLE = keccak256("LEGAL_ROLE");
+    bytes32 public constant REWARD_MANAGER = keccak256("REWARD_MANAGER");
 
-contract NFTm is ERC721, Ownable, ReentrancyGuard {
-    using Strings for uint256;
-    using Counters for Counters.Counter;
-
-    struct LegalInfo {
-        string LLCNumber;
-        string jurisdiction;
-        uint256 registryDate;
+    // ========== 手续费结构 ==========
+    struct FeeSettings {
+        uint256 baseFee;        // 基础交易费率（基点：100 = 1%）
+        uint256 maxFee;         // 最大允许费率（基点）
+        address feeCollector;   // 手续费接收地址
     }
 
-    Counters.Counter private _tokenIdCounter;
-    IAdminControl public adminController;
-    
-    mapping(uint256 => string) private _tokenURIs;
-    mapping(uint256 => LegalInfo) public legalRecords;
-    mapping(address => bool) private _approvedMinters;
+    // ========== 奖励参数结构 ==========
+    struct RewardParameters {
+        uint256 baseRate;              // 基础奖励率（基点）
+        uint256 communityMultiplier;   // 社区加成系数
+        uint256 maxLeaseBonus;         // 最大租赁期限加成
+        address rewardsVault;          // 奖励金库地址
+    }
 
-    event MetadataUpdated(uint256 indexed tokenId);
-    event LegalRecordUpdated(uint256 indexed tokenId);
-    event ControllershipTransferred(address newController);
+    // ========== 状态变量 ==========
+    FeeSettings public feeConfig;
+    RewardParameters public rewardParams;
+    
+    EnumerableSet.AddressSet private _kycVerified;
+    mapping(address => uint256) public communityScores;
+    mapping(uint256 => bool) public functionPaused;
+
+    // ========== 事件定义 ==========
+    event FeeConfigUpdated(uint256 newBaseFee, uint256 newMaxFee);
+    event RewardParametersUpdated(uint256 newBaseRate, uint256 newMultiplier);
+    event KYCStatusUpdated(address indexed account, bool status);
+    function _initializeRoles(address admin) internal {
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(OPERATOR_ROLE, admin);
+        _grantRole(LEGAL_ROLE, admin);
+        _grantRole(REWARD_MANAGER, admin);
+    }
 
     constructor(
-        address adminControlAddress,
-        address initialOwner
-    ) ERC721("RealEstateNFT", "RNFT") Ownable(initialOwner) {
-        adminController = IAdminControl(adminControlAddress);
+        address initialAdmin,
+        address feeCollector,
+        address rewardsVault
+    ) {
+        require(initialAdmin != address(0), "Invalid admin address");
+        
+        // 初始化角色分配
+        _initializeRoles(initialAdmin);
+
+        // 初始化费用配置
+        feeConfig = FeeSettings({
+            baseFee: 200,       // 2%
+            maxFee: 1000,       // 10%
+            feeCollector: feeCollector
+        });
+
+        // 初始化奖励参数
+        rewardParams = RewardParameters({
+            baseRate: 1000,     // 10% 基础奖励
+            communityMultiplier: 2000, // 20% 社区最大加成
+            maxLeaseBonus: 300, // 3% 最大租赁加成
+            rewardsVault: rewardsVault
+        });
     }
 
-    function _verifyTokenExistence(uint256 tokenId) internal view {
-        require(_ownerOf(tokenId) != address(0), "ERC721: Invalid token ID");
+    // ========== 手续费管理 ==========
+    function updateFeeConfig(
+        uint256 newBaseFee, 
+        address newCollector
+    ) external onlyRole(OPERATOR_ROLE) {
+        require(newBaseFee <= feeConfig.maxFee, "Exceeds max fee");
+        feeConfig.baseFee = newBaseFee;
+        feeConfig.feeCollector = newCollector;
+        emit FeeConfigUpdated(newBaseFee, feeConfig.maxFee);
     }
 
-    function mintPropertyNFT(
-        address to,
-        string memory tokenURI_,
-        LegalInfo calldata legalInfo
-    ) external nonReentrant returns (uint256) {
-        require(
-            _approvedMinters[msg.sender] || adminController.isMinter(msg.sender),
-            "Minter authorization required"
-        );
-        require(_validateLegalInfo(legalInfo), "Invalid legal data");
-
-        _tokenIdCounter.increment();
-        uint256 newTokenId = _tokenIdCounter.current();
-
-        _safeMint(to, newTokenId);
-        _setTokenURI(newTokenId, tokenURI_);
-        legalRecords[newTokenId] = legalInfo;
-
-        return newTokenId;
+    // ========== KYC 管理 ==========
+    function batchApproveKYC(
+        address[] calldata accounts, 
+        bool approved
+    ) external onlyRole(LEGAL_ROLE) {
+        for(uint i = 0; i < accounts.length; i++) {
+            approved ? _kycVerified.add(accounts[i]) : _kycVerified.remove(accounts[i]);
+            emit KYCStatusUpdated(accounts[i], approved);
+        }
     }
 
-    function updateLegalRecord(
-        uint256 tokenId,
-        LegalInfo calldata newInfo
-    ) external onlyLegalAuthority {
-        _verifyTokenExistence(tokenId);
-        legalRecords[tokenId] = newInfo;
-        emit LegalRecordUpdated(tokenId);
+    // ========== 奖励管理 ==========
+    function configureRewards(
+        uint256 newBaseRate,
+        uint256 newMultiplier,
+        uint256 newLeaseBonus
+    ) external onlyRole(REWARD_MANAGER) {
+        require(newBaseRate <= 2000, "Base rate >20%");
+        require(newMultiplier <= 1500, "Multiplier >15%");
+        require(newLeaseBonus <= 500, "Lease bonus >5%");
+
+        rewardParams.baseRate = newBaseRate;
+        rewardParams.communityMultiplier = newMultiplier;
+        rewardParams.maxLeaseBonus = newLeaseBonus;
+        
+        emit RewardParametersUpdated(newBaseRate, newMultiplier);
     }
 
-    function _setTokenURI(uint256 tokenId, string memory uri) internal {
-        require(bytes(uri).length > 0, "Empty URI");
-        _tokenURIs[tokenId] = uri;
-        emit MetadataUpdated(tokenId);
+    // ========== 紧急控制 ==========
+    function emergencyPauseFunction(
+        uint256 functionId, 
+        bool paused
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        functionPaused[functionId] = paused;
     }
 
-    function tokenURI(uint256 tokenId) 
-        public 
-        view 
-        virtual 
-        override 
-        returns (string memory) 
-    {
-        _verifyTokenExistence(tokenId);
-        return string(abi.encodePacked(_tokenURIs[tokenId], "/metadata.json"));
+    function globalPause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
     }
 
-    modifier onlyAdmin() {
-        require(adminController.isAdmin(msg.sender), "Admin required");
+    function globalUnpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
+    }
+
+    // ========== 社区积分管理 ==========
+    function updateCommunityScore(
+        address user, 
+        uint256 scoreDelta, 
+        bool isAddition
+    ) external onlyRole(OPERATOR_ROLE) {
+        if(isAddition) {
+            communityScores[user] += scoreDelta;
+        } else {
+            communityScores[user] = communityScores[user] > scoreDelta ? 
+                communityScores[user] - scoreDelta : 0;
+        }
+    }
+
+    // ========== 视图函数 ==========
+    function getCurrentFee() external view returns (uint256) {
+        return feeConfig.baseFee;
+    }
+
+    function isKYCVerified(address account) external view returns (bool) {
+        return _kycVerified.contains(account);
+    }
+
+    function calculateRewards(
+        address user, 
+        uint256 baseAmount
+    ) external view returns (uint256) {
+        uint256 leaseBonus = _getLeaseBonus(user);
+        uint256 communityBonus = _getCommunityBonus(user);
+        return baseAmount * (rewardParams.baseRate + leaseBonus + communityBonus) / 10000;
+    }
+
+    // ========== 内部函数 ==========
+    function _getLeaseBonus(address /*user*/) internal view returns (uint256) {
+        // 根据实际租赁数据计算加成
+         return rewardParams.maxLeaseBonus;  // 暂时返回配置的最大值
+    }
+
+    function _getCommunityBonus(address user) internal view returns (uint256) {
+        uint256 score = communityScores[user];
+        return score > rewardParams.communityMultiplier ? 
+            rewardParams.communityMultiplier : score;
+    }
+
+    modifier whenFunctionActive(uint256 functionId) {
+        require(!functionPaused[functionId], "Function paused");
         _;
-    }
-
-    modifier onlyLegalAuthority() {
-        require(adminController.isLegalAuthority(msg.sender), "Legal authority required");
-        _;
-    }
-
-    function addApprovedMinter(address minter) external onlyAdmin {
-        _approvedMinters[minter] = true;
-    }
-
-    function revokeMinter(address minter) external onlyAdmin {
-        delete _approvedMinters[minter];
-    }
-
-    function setAdminController(address newController) external onlyOwner {
-        adminController = IAdminControl(newController);
-        emit ControllershipTransferred(newController);
-    }
-
-    function _validateLegalInfo(LegalInfo memory info) internal pure returns (bool) {
-        return (bytes(info.LLCNumber).length >= 5 && 
-                bytes(info.jurisdiction).length == 2 &&
-                info.registryDate > 1609459200);
-    }
-
-    function totalSupply() public view returns (uint256) {
-        return _tokenIdCounter.current();
-    }
-
-    function isMinterApproved(address account) public view returns (bool) {
-        return _approvedMinters[account];
     }
 }
