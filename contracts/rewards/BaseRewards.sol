@@ -4,25 +4,19 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 
 contract BaseRewards is Ownable, ReentrancyGuard {
-    using SafeMath for uint256;
-
-    // 质押资产 (例如:ERC20代币)
     IERC20 public stakingToken;
-    // 奖励代币
     IERC20 public rewardsToken;
 
-    // 奖励率参数
-    uint256 public rewardRate;     // 每秒奖励数量
-    uint256 public lastUpdateTime; // 最后更新时间戳
+    // 奖励参数
+    uint256 public rewardRate;          // 每秒奖励数量
+    uint256 public lastUpdateTime;      // 最后更新时间戳
     uint256 public rewardPerTokenStored;
 
-    // 用户相关配置
+    // 用户数据
     mapping(address => uint256) public userRewardPerTokenPaid;
     mapping(address => uint256) public rewards;
-
     uint256 private _totalSupply;
     mapping(address => uint256) private _balances;
 
@@ -30,16 +24,18 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     event Withdrawn(address indexed user, uint256 amount);
     event RewardPaid(address indexed user, uint256 reward);
 
+    // ======== 关键修复点 ========
     constructor(
-        address _stakingToken, 
+        address _stakingToken,
         address _rewardsToken,
         address initialOwner
-    ) Ownable(initialOwner) {
+    ) {
         stakingToken = IERC20(_stakingToken);
         rewardsToken = IERC20(_rewardsToken);
+        _transferOwnership(initialOwner);
     }
 
-    /******************** 核心功能 ********************/
+    // =============== 核心功能 ===============
     function stake(uint256 amount) external nonReentrant updateReward(msg.sender) {
         require(amount > 0, "Cannot stake 0");
         _totalSupply += amount;
@@ -65,16 +61,12 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         }
     }
 
-    /******************** 管理功能 ********************/
+    // =============== 管理功能 ===============
     function setRewardRate(uint256 _rewardRate) external onlyOwner {
         rewardRate = _rewardRate;
     }
 
-    function rescueERC20(address tokenAddress, uint256 amount) external onlyOwner {
-        IERC20(tokenAddress).transfer(owner(), amount);
-    }
-
-    /******************** 视图函数 ********************/
+    // =============== 视图函数 ===============
     function totalSupply() external view returns (uint256) {
         return _totalSupply;
     }
@@ -84,24 +76,15 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     }
 
     function earned(address account) public view returns (uint256) {
-        return
-            _balances[account]
-                .mul(rewardPerToken().sub(userRewardPerTokenPaid[account]))
-                .div(1e18)
-                .add(rewards[account]);
+        return _balances[account] * (rewardPerToken() - userRewardPerTokenPaid[account]) / 1e18 + rewards[account];
     }
 
     function rewardPerToken() public view returns (uint256) {
-        if (_totalSupply == 0) {
-            return rewardPerTokenStored;
-        }
-        return
-            rewardPerTokenStored.add(
-                (block.timestamp.sub(lastUpdateTime)).mul(rewardRate).mul(1e18).div(_totalSupply)
-            );
+        if (_totalSupply == 0) return rewardPerTokenStored;
+        return rewardPerTokenStored + ((block.timestamp - lastUpdateTime) * rewardRate * 1e18) / _totalSupply;
     }
 
-    /******************** 修饰器 ********************/
+    // =============== 修饰器 ===============
     modifier updateReward(address account) {
         rewardPerTokenStored = rewardPerToken();
         lastUpdateTime = block.timestamp;
@@ -112,3 +95,4 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         _;
     }
 }
+
