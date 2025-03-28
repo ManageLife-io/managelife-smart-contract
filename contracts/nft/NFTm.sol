@@ -25,7 +25,7 @@ contract NFTm is ERC721, Ownable, ReentrancyGuard {
 
     Counters.Counter private _tokenIdCounter;
     IAdminControl public adminController;
-
+    
     mapping(uint256 => string) private _tokenURIs;
     mapping(uint256 => LegalInfo) public legalRecords;
     mapping(address => bool) private _approvedMinters;
@@ -34,13 +34,12 @@ contract NFTm is ERC721, Ownable, ReentrancyGuard {
     event LegalRecordUpdated(uint256 indexed tokenId);
     event ControllershipTransferred(address newController);
 
-    // ======== 核心修复点 ========
     constructor(
         address adminControlAddress,
         address initialOwner
     ) ERC721("RealEstateNFT", "RNFT") {
-        adminController = IAdminControl(adminControlAddress);
         _transferOwnership(initialOwner);
+        adminController = IAdminControl(adminControlAddress);
     }
 
     // ======== 核心功能 ========
@@ -76,14 +75,14 @@ contract NFTm is ERC721, Ownable, ReentrancyGuard {
     }
 
     // ======== 元数据管理 ========
-    function tokenURI(uint256 tokenId)
-        public
-        view
-        virtual
-        override
-        returns (string memory)
+    function tokenURI(uint256 tokenId) 
+        public 
+        view 
+        virtual 
+        override 
+        returns (string memory) 
     {
-        require(_exists(tokenId), "ERC721Metadata: URI query for nonexistent token");
+        require(_ownsToken(tokenId), "ERC721Metadata: URI query for nonexistent token");
         return string(abi.encodePacked(_tokenURIs[tokenId], "/metadata.json"));
     }
 
@@ -117,7 +116,7 @@ contract NFTm is ERC721, Ownable, ReentrancyGuard {
 
     // ======== 内部工具 ========
     function _verifyTokenExistence(uint256 tokenId) internal view {
-        require(_exists(tokenId), "Token Does Not Exist");
+        require(_ownsToken(tokenId), "Token Does Not Exist");
     }
 
     function _setTokenURI(uint256 tokenId, string memory uri) internal {
@@ -127,11 +126,9 @@ contract NFTm is ERC721, Ownable, ReentrancyGuard {
     }
 
     function _validateLegalInfo(LegalInfo memory info) internal pure returns (bool) {
-        return (
-            bytes(info.LLCNumber).length >= 5 &&
-            bytes(info.jurisdiction).length == 2 &&
-            info.registryDate > 1609459200  // 2021-01-01之后
-        );
+        return (bytes(info.LLCNumber).length >= 5 && 
+                bytes(info.jurisdiction).length == 2 &&
+                info.registryDate > 1609459200); // 2021-01-01之后
     }
 
     // ======== 视图函数 ========
@@ -142,5 +139,9 @@ contract NFTm is ERC721, Ownable, ReentrancyGuard {
     function isApprovedMinter(address account) public view returns (bool) {
         return _approvedMinters[account];
     }
-}
 
+    // ===== 核心修复点 =====
+    function _ownsToken(uint256 tokenId) internal view returns (bool) {
+        return _ownerOf(tokenId) != address(0);
+    }
+}
