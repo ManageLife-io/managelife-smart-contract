@@ -16,7 +16,7 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         uint256 endTime;
         uint256 totalRewards;
         uint256 claimedRewards;
-        address rewardsToken; // 支持多奖励代币
+        address rewardsToken; // Supports multiple reward tokens
     }
 
     IERC20 public immutable stakingToken;
@@ -40,7 +40,7 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         _grantRole(REWARD_MANAGER, admin);
     }
 
-    // ================== 核心功能 ==================
+    // ================== Core Functions ==================
     function stake(uint256 amount) external nonReentrant {
         require(amount > 0, "Amount must be > 0");
         _updateRewards(msg.sender);
@@ -66,7 +66,7 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         emit Withdrawn(msg.sender, amount);
     }
 
-    // ================== 奖励管理 ==================
+    // ================== Reward Management ==================
     function addRewardSchedule(
         uint256 startTime,
         uint256 duration,
@@ -92,7 +92,7 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         emit RewardScheduleAdded(scheduleId);
     }
 
-    // ================== 奖励计算 ==================
+    // ================== Reward Calculation ==================
     function earned(address account) public view returns (uint256 total) {
         for (uint256 i = 1; i <= currentScheduleId; i++) {
             total = total.add(_earnedPerSchedule(account, i));
@@ -113,7 +113,7 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         return availableRewards.mul(userShare).div(1e18).sub(_userAccrued[account][scheduleId]);
     }
 
-    // ================== 奖励领取 ==================
+    // ================== Reward Claiming ==================
     function claimRewards() external nonReentrant {
         _updateRewards(msg.sender);
         
@@ -123,7 +123,7 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
             uint256 amount = _userAccrued[msg.sender][i];
             if (amount == 0) continue;
 
-            // 安全检查
+            // Security checks
             require(
                 schedule.claimedRewards.add(amount) <= schedule.totalRewards,
                 "Over claimed"
@@ -140,7 +140,7 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         emit RewardClaimed(msg.sender, totalClaimed, address(stakingToken));
     }
 
-    // ================== 内部函数 ==================
+    // ================== Internal Functions ==================
     function _updateRewards(address account) internal {
         for (uint256 i = 1; i <= currentScheduleId; i++) {
             _userAccrued[account][i] = _userAccrued[account][i].add(_earnedPerSchedule(account, i));
@@ -156,7 +156,7 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         require(success, "Transfer failed");
     }
 
-    // ================== 视图函数 ==================
+    // ================== View Functions ==================
     function balanceOf(address account) public view returns (uint256) {
         return _balances[account];
     }

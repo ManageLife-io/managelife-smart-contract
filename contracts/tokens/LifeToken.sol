@@ -1,42 +1,50 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// 使用适配版本的OpenZeppelin合约
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 
+/// @title LifeToken - An ERC20 token with elastic supply mechanism
+/// @notice This contract implements a rebasing ERC20 token with initial distribution functionality
+/// @dev Inherits from OpenZeppelin's ERC20 and Ownable contracts
+/// @dev Implements a rebase mechanism that can adjust total supply and user balances
+/// @dev Features include:
+///      - Elastic supply through rebase mechanism
+///      - Initial token distribution system
+///      - Exclusion of addresses from rebase effects
+///      - Owner-controlled rebase parameters
 contract LifeToken is ERC20, Ownable {
     using SafeMath for uint256;
 
     // =============================
-    // 常量声明
+    // Constants
     // =============================
-    uint256 public constant MAX_SUPPLY = 5_000_000_000 * 1e18;     // 50亿
-    uint256 public constant INITIAL_SUPPLY = 2_000_000_000 * 1e18; // 初始20亿
+    uint256 public constant MAX_SUPPLY = 5_000_000_000 * 1e18;     // 5 billion
+    uint256 public constant INITIAL_SUPPLY = 2_000_000_000 * 1e18; // Initial 2 billion
 
     // =============================
-    // 数据结构
+    // Data Structures
     // =============================
     struct RebaseConfig {
-        uint256 lastRebaseTime;   // 上次调整时间
-        uint256 minRebaseInterval;// 最小间隔（秒）
-        uint256 rebaseFactor;     // 调整系数（1e18为基础）
+        uint256 lastRebaseTime;   // Last rebase time
+        uint256 minRebaseInterval;// Minimum interval (seconds)
+        uint256 rebaseFactor;     // Rebase factor (based on 1e18)
     }
 
     // =============================
-    // 状态变量
+    // State Variables
     // =============================
-    address public rebaser;       // Rebase操作员
-    address public distributor;   // 初始分发地址
-    bool public initialDistributionDone; // 初始分发状态
+    address public rebaser;       // Rebase operator
+    address public distributor;   // Initial distribution address
+    bool public initialDistributionDone; // Initial distribution status
     
-    RebaseConfig public rebaseConfig;     // Rebase配置
-    mapping(address => bool) private _isExcludedFromRebase; // 排除地址列表
-    mapping(address => uint256) private _baseBalances;      // 基础余额存储
+    RebaseConfig public rebaseConfig;     // Rebase configuration
+    mapping(address => bool) private _isExcludedFromRebase; // Excluded addresses list
+    mapping(address => uint256) private _baseBalances;      // Base balance storage
 
     // =============================
-    // 事件
+    // Events
     // =============================
     event Rebase(uint256 indexed epoch, uint256 oldFactor, uint256 newFactor);
     event RebaserUpdated(address indexed newRebaser);
@@ -44,7 +52,7 @@ contract LifeToken is ERC20, Ownable {
     event ExcludedFromRebase(address indexed account, bool excluded);
 
     // =============================
-    // 修饰符
+    // Modifiers
     // =============================
     modifier onlyRebaser() {
         require(msg.sender == rebaser, "Caller is not the rebaser");
@@ -57,38 +65,40 @@ contract LifeToken is ERC20, Ownable {
     }
 
     // =============================
-    // 构造函数
+    // Constructor
     // =============================
+    /// @notice Initializes the LifeToken contract
+    /// @dev Sets up initial token parameters, ownership, and mints initial supply
+    /// @param initialOwner_ The address that will receive initial ownership and control
     constructor(address initialOwner_)
         ERC20("ManageLife Token", "Life")
     {
-        // 手动转移所有权
         _transferOwnership(initialOwner_);
         
-        // 初始化权限地址
         rebaser = initialOwner_;
         distributor = initialOwner_;
 
-        // 设置初始Rebase配置
         rebaseConfig = RebaseConfig({
             lastRebaseTime: block.timestamp,
             minRebaseInterval: 30 days,
             rebaseFactor: 1e18 // 1:1
         });
 
-        // 铸造初始供应量到合约地址
         _baseBalances[address(this)] = INITIAL_SUPPLY;
         emit Transfer(address(0), address(this), INITIAL_SUPPLY);
     }
 
     // =============================
-    // 主要功能函数
+    // Main Functions
     // =============================
     
     /**
-     * @dev 执行供应量调整
-     * @param newFactor_ 新调整系数（1e18为基础，例如1.1e18表示+10%）
+     * @dev Executes supply adjustment
+     * @param newFactor_ New adjustment factor (based on 1e18, e.g., 1.1e18 means +10%)
      */
+    /// @notice Adjusts the token's supply elastically through a rebase operation
+    /// @dev Can only be called by the rebaser role after minimum interval has passed
+    /// @param newFactor_ New rebase factor (1e18 based, e.g., 1.1e18 for +10%)
     function rebase(uint256 newFactor_) external onlyRebaser {
         require(
             block.timestamp >= rebaseConfig.lastRebaseTime.add(rebaseConfig.minRebaseInterval),
@@ -107,10 +117,14 @@ contract LifeToken is ERC20, Ownable {
     }
 
     /**
-     * @dev 初始代币分发
-     * @param recipients_ 接收地址数组
-     * @param amounts_ 分配数量数组（单位：百万枚）
+     * @dev Initial token distribution
+     * @param recipients_ Array of addresses to receive tokens
+     * @param amounts_ Array of token amounts in millions (e.g., 1 = 1M tokens)
      */
+    /// @notice Performs the initial token distribution to specified addresses
+    /// @dev Can only be called once by the distributor
+    /// @param recipients_ Array of addresses to receive tokens
+    /// @param amounts_ Array of token amounts in millions (e.g., 1 = 1M tokens)
     function initialDistribution(
         address[] calldata recipients_,
         uint256[] calldata amounts_
@@ -130,12 +144,16 @@ contract LifeToken is ERC20, Ownable {
     }
 
     // =============================
-    // 视图函数
+    // View Function
     // =============================
     
     /**
-     * @dev 获取调整后的余额
+     * @dev Gets the adjusted balance
      */
+    /// @notice Returns the current balance of an account, adjusted by the rebase factor
+    /// @dev For excluded accounts, returns the base balance without rebase adjustment
+    /// @param account The address to query the balance of
+    /// @return The current balance of the account
     function balanceOf(address account) public view override returns (uint256) {
         if (_isExcludedFromRebase[account]) {
             return _baseBalances[account];
@@ -144,18 +162,21 @@ contract LifeToken is ERC20, Ownable {
     }
 
     /**
-     * @dev 获取调整后的总供应量
+     * @dev Gets the adjusted total supply
      */
+    /// @notice Returns the current total supply, adjusted by the rebase factor
+    /// @dev Calculates total supply based on base supply and current rebase factor
+    /// @return The current total token supply
     function totalSupply() public view override returns (uint256) {
         return super.totalSupply().mul(rebaseConfig.rebaseFactor).div(1e18);
     }
 
     // =============================
-    // 内部函数
+    // Internal Function
     // =============================
     
     /**
-     * @dev 重写转账逻辑
+     * @dev Rewrites the transfer logic
      */
     function _transfer(
         address sender,
@@ -168,12 +189,12 @@ contract LifeToken is ERC20, Ownable {
         uint256 senderBalance = balanceOf(sender);
         require(senderBalance >= amount, "ERC20: transfer amount exceeds balance");
 
-        // 转换为基础单位
+        // Convert to base unit
         uint256 baseAmount = _isExcludedFromRebase[sender]
             ? amount
             : amount.mul(1e18).div(rebaseConfig.rebaseFactor);
 
-        // 更新基础余额
+        // Update base balance
         _baseBalances[sender] = _baseBalances[sender].sub(baseAmount);
         _baseBalances[recipient] = _baseBalances[recipient].add(baseAmount);
 
@@ -181,21 +202,31 @@ contract LifeToken is ERC20, Ownable {
     }
 
     // =============================
-    // 管理函数
+    // Management Function
     // =============================
     
+    /// @notice Updates the address authorized to perform rebase operations
+    /// @dev Can only be called by the contract owner
+    /// @param newRebaser_ The new rebaser address
     function setRebaser(address newRebaser_) external onlyOwner {
         require(newRebaser_ != address(0), "Invalid address");
         rebaser = newRebaser_;
         emit RebaserUpdated(newRebaser_);
     }
 
+    /// @notice Updates the address authorized to perform initial distribution
+    /// @dev Can only be called by the owner before initial distribution is completed
+    /// @param newDistributor_ The new distributor address
     function setDistributor(address newDistributor_) external onlyOwner {
         require(!initialDistributionDone, "Distribution already completed");
         distributor = newDistributor_;
         emit DistributorUpdated(newDistributor_);
     }
 
+    /// @notice Excludes or includes an account from rebase effects
+    /// @dev Can only be called by the contract owner
+    /// @param account_ The address to exclude or include
+    /// @param excluded_ True to exclude, false to include
     function excludeFromRebase(address account_, bool excluded_) external onlyOwner {
         _isExcludedFromRebase[account_] = excluded_;
         emit ExcludedFromRebase(account_, excluded_);

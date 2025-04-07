@@ -6,8 +6,12 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "../governance/AdminControl.sol";
 
+/// @title PropertyMarket - A decentralized marketplace for real estate NFTs
+/// @notice This contract enables listing, buying, selling and bidding on real estate NFTs
+/// @dev Implements a secure marketplace with support for both direct purchases and bidding
+/// @custom:security-contact security@example.com
 contract PropertyMarket is ReentrancyGuard {
-    // ========== 数据结构 ==========
+    // ========== Data Structures ==========
     enum PropertyStatus { LISTED, RENTED, SOLD, DELISTED }    
     
     struct Bid {
@@ -29,7 +33,7 @@ contract PropertyMarket is ReentrancyGuard {
         uint256 lastRenewed;
     }
 
-    // ========== 状态变量 ==========
+    // ========== State Variables ==========
     AdminControl public immutable adminControl;
     IERC721 public immutable nftiContract;
     IERC721 public immutable nftmContract;
@@ -37,11 +41,11 @@ contract PropertyMarket is ReentrancyGuard {
     mapping(uint256 => PropertyListing) public listings;
     mapping(address => mapping(uint256 => uint256)) public leaseTerms;
     
-    // 竞价相关映射
-    mapping(uint256 => Bid[]) public bidsForToken; // tokenId => 所有出价
-    mapping(address => mapping(uint256 => uint256)) public bidIndexByBidder; // bidder => tokenId => bidIndex+1 (0表示无出价)
+    // Bidding related mappings
+    mapping(uint256 => Bid[]) public bidsForToken; // tokenId => all bids
+    mapping(address => mapping(uint256 => uint256)) public bidIndexByBidder; // bidder => tokenId => bidIndex+1 (0 means no bid)
 
-    // ========== 事件定义 ==========
+    // ========== Event Definitions ==========
     event NewListing(
         uint256 indexed tokenId,
         address indexed seller,
@@ -62,7 +66,7 @@ contract PropertyMarket is ReentrancyGuard {
         address newPaymentToken
     );
     
-    // 竞价相关事件
+    // Bidding related events
     event BidPlaced(
         uint256 indexed tokenId,
         address indexed bidder,
@@ -84,7 +88,7 @@ contract PropertyMarket is ReentrancyGuard {
         uint256 amount
     );
 
-    // ========== 构造函数 ==========
+    // ========== Constructor ==========
     constructor(
         address _adminControl,
         address _nftiAddress,
@@ -95,7 +99,12 @@ contract PropertyMarket is ReentrancyGuard {
         nftmContract = IERC721(_nftmAddress);
     }
 
-    // ========== 核心功能 ==========
+    // ========== Core Functions ==========
+    /// @notice Lists a property NFT for sale in the marketplace
+    /// @dev Requires the caller to be the NFT owner and KYC verified
+    /// @param tokenId The ID of the NFT to list
+    /// @param price The listing price
+    /// @param paymentToken The token address for payment (address(0) for ETH)
     function listProperty(
         uint256 tokenId,
         uint256 price,
@@ -126,6 +135,10 @@ contract PropertyMarket is ReentrancyGuard {
         emit NewListing(tokenId, msg.sender, price, paymentToken);
     }
 
+    /// @notice Purchases a listed property at the listed price
+    /// @dev Handles both ETH and ERC20 payments with fee calculation
+    /// @param tokenId The ID of the NFT to purchase
+    /// @param offerPrice The amount offered for the property
     function purchaseProperty(
         uint256 tokenId,
         uint256 offerPrice
@@ -168,7 +181,7 @@ contract PropertyMarket is ReentrancyGuard {
         );
     }
 
-    // ========== 支付处理函数 ==========
+    // ========== Payment Processing Functions ==========
     function _validatePayment(
         uint256 listedPrice,
         uint256 offerPrice,
@@ -212,7 +225,12 @@ contract PropertyMarket is ReentrancyGuard {
         }
     }
 
-    // ========== 管理功能 ==========
+    // ========== Management Functions ==========
+    /// @notice Updates the price and payment token of a listed property
+    /// @dev Only callable by operators
+    /// @param tokenId The ID of the NFT to update
+    /// @param newPrice The new listing price
+    /// @param newPaymentToken The new payment token address
     function updateListing(
         uint256 tokenId,
         uint256 newPrice,
@@ -231,7 +249,7 @@ contract PropertyMarket is ReentrancyGuard {
         emit ListingUpdated(tokenId, newPrice, newPaymentToken);
     }
 
-    // ========== 权限修饰符 ==========
+    // ========== Access Modifiers ==========
     modifier onlyOperator() {
         bytes32 role = adminControl.OPERATOR_ROLE();
         require(
@@ -241,7 +259,15 @@ contract PropertyMarket is ReentrancyGuard {
         _;
     }
 
-    // ========== 辅助功能 ==========
+    // ========== Helper Functions ==========
+    /// @notice Retrieves the full details of a property listing
+    /// @dev Returns all relevant information about a listed property
+    /// @param tokenId The ID of the NFT
+    /// @return seller The address of the seller
+    /// @return price The current listing price
+    /// @return paymentToken The accepted payment token address
+    /// @return status The current status of the listing
+    /// @return listTimestamp The timestamp when the property was listed
     function getListingDetails(uint256 tokenId)
         external
         view
@@ -263,7 +289,7 @@ contract PropertyMarket is ReentrancyGuard {
         );
     }
     
-    // ========== 竞价功能 ==========
+    // ========== Bidding Functions ==========
     
     /**
      * @dev 买家对NFT进行出价
@@ -271,6 +297,11 @@ contract PropertyMarket is ReentrancyGuard {
      * @param bidAmount 出价金额
      * @param paymentToken 支付代币地址（0地址表示ETH）
      */
+    /// @notice Places a bid on a listed property
+    /// @dev Requires KYC verification and proper token approval
+    /// @param tokenId The ID of the NFT to bid on
+    /// @param bidAmount The amount to bid
+    /// @param paymentToken The token address for payment (address(0) for ETH)
     function placeBid(uint256 tokenId, uint256 bidAmount, address paymentToken) external nonReentrant {
         PropertyListing storage listing = listings[tokenId];
         require(listing.status == PropertyStatus.LISTED, "Property not listed");
@@ -278,26 +309,26 @@ contract PropertyMarket is ReentrancyGuard {
         require(bidAmount > 0, "Bid amount must be greater than 0");
         require(adminControl.isKYCVerified(msg.sender), "KYC required");
         
-        // 检查是否已有出价，如果有则更新
+        // Check if bid exists and update if it does
         uint256 existingBidIndex = bidIndexByBidder[msg.sender][tokenId];
         
-        // 处理代币授权
+        // Handle token approval
         if (paymentToken != address(0)) {
             IERC20 token = IERC20(paymentToken);
-            // 检查授权额度
+            // Check allowance
             uint256 allowance = token.allowance(msg.sender, address(this));
             require(allowance >= bidAmount, "Insufficient token allowance");
         }
         
         if (existingBidIndex > 0) {
-            // 更新现有出价
+            // Update existing bid
             Bid storage existingBid = bidsForToken[tokenId][existingBidIndex - 1];
             require(existingBid.isActive, "Bid is not active");
             existingBid.amount = bidAmount;
             existingBid.paymentToken = paymentToken;
             existingBid.bidTimestamp = block.timestamp;
         } else {
-            // 创建新出价
+            // Create new bid
             Bid memory newBid = Bid({
                 tokenId: tokenId,
                 bidder: msg.sender,
@@ -319,6 +350,10 @@ contract PropertyMarket is ReentrancyGuard {
      * @param tokenId NFT的ID
      * @param bidder 买家地址
      */
+    /// @notice Accepts a specific bid on a listed property
+    /// @dev Transfers NFT to bidder and handles payment to seller
+    /// @param tokenId The ID of the NFT
+    /// @param bidder The address of the bidder whose bid to accept
     function acceptBid(uint256 tokenId, address bidder) external nonReentrant {
         PropertyListing storage listing = listings[tokenId];
         require(listing.status == PropertyStatus.LISTED, "Property not listed");
@@ -330,43 +365,43 @@ contract PropertyMarket is ReentrancyGuard {
         Bid storage acceptedBid = bidsForToken[tokenId][bidIndex - 1];
         require(acceptedBid.isActive, "Bid is not active");
         
-        // 确保NFT所有权
+        // Verify NFT ownership
         require(nftiContract.ownerOf(tokenId) == msg.sender, "Not NFT owner");
         
-        // 处理支付
+        // Process payment
         (uint256 baseFee,, address feeCollector) = adminControl.feeConfig();
         uint256 fees = (acceptedBid.amount * baseFee) / 10000;
         uint256 netValue = acceptedBid.amount - fees;
         
         if (acceptedBid.paymentToken == address(0)) {
-            // ETH支付 - 这种情况下需要买家发送ETH
-            // 由于我们使用预授权模式，这里不处理ETH转账
+            // ETH payment - requires buyer to send ETH
+            // ETH transfer not handled here as we use pre-authorization model
             revert("ETH bids not supported in this version");
         } else {
-            // ERC20代币支付
+            // ERC20 token payment
             IERC20 token = IERC20(acceptedBid.paymentToken);
             
-            // 从买家转账到卖家
+            // Transfer from buyer to seller
             require(
                 token.transferFrom(acceptedBid.bidder, msg.sender, netValue),
                 "Transfer to seller failed"
             );
             
-            // 从买家转账到费用收集者
+            // Transfer fee from buyer to fee collector
             require(
                 token.transferFrom(acceptedBid.bidder, feeCollector, fees),
                 "Fee transfer failed"
             );
         }
         
-        // 转移NFT
+        // Transfer NFT
         nftiContract.transferFrom(msg.sender, acceptedBid.bidder, tokenId);
         
-        // 更新状态
+        // Update status
         listing.status = PropertyStatus.SOLD;
         acceptedBid.isActive = false;
         
-        // 清除该NFT的所有其他出价
+        // Clear all other bids for this NFT
         _clearAllBidsExcept(tokenId, bidIndex - 1);
         
         emit BidAccepted(
@@ -382,6 +417,9 @@ contract PropertyMarket is ReentrancyGuard {
      * @dev 买家取消自己的出价
      * @param tokenId NFT的ID
      */
+    /// @notice Cancels an active bid placed by the caller
+    /// @dev Only the original bidder can cancel their bid
+    /// @param tokenId The ID of the NFT the bid was placed on
     function cancelBid(uint256 tokenId) external nonReentrant {
         uint256 bidIndex = bidIndexByBidder[msg.sender][tokenId];
         require(bidIndex > 0, "No active bid");
@@ -401,22 +439,26 @@ contract PropertyMarket is ReentrancyGuard {
      * @param tokenId NFT的ID
      * @return 活跃出价数组
      */
+    /// @notice Gets all active bids for a specific property
+    /// @dev Returns an array of active bids, filtering out inactive ones
+    /// @param tokenId The ID of the NFT
+    /// @return An array of active Bid structs
     function getActiveBidsForToken(uint256 tokenId) external view returns (Bid[] memory) {
         Bid[] storage allBids = bidsForToken[tokenId];
         uint256 activeCount = 0;
         
-        // 计算活跃出价数量
+        // Count active bids
         for (uint256 i = 0; i < allBids.length; i++) {
             if (allBids[i].isActive) {
                 activeCount++;
             }
         }
         
-        // 创建结果数组
+        // Create result array
         Bid[] memory activeBids = new Bid[](activeCount);
         uint256 currentIndex = 0;
         
-        // 填充结果数组
+        // Fill result array
         for (uint256 i = 0; i < allBids.length; i++) {
             if (allBids[i].isActive) {
                 activeBids[currentIndex] = allBids[i];
@@ -433,10 +475,15 @@ contract PropertyMarket is ReentrancyGuard {
      * @param bidder 买家地址
      * @return 出价信息，如果不存在则返回默认值
      */
+    /// @notice Gets the current bid from a specific bidder
+    /// @dev Returns a default empty bid if no active bid exists
+    /// @param tokenId The ID of the NFT
+    /// @param bidder The address of the bidder
+    /// @return The Bid struct containing bid details
     function getBidFromBidder(uint256 tokenId, address bidder) external view returns (Bid memory) {
         uint256 bidIndex = bidIndexByBidder[bidder][tokenId];
         if (bidIndex == 0) {
-            // 返回空出价
+            // Return empty bid
             return Bid(0, address(0), 0, address(0), 0, false);
         }
         
