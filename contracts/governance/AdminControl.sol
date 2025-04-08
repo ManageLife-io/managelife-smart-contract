@@ -190,11 +190,6 @@ contract AdminControl is AccessControl, Pausable {
     /// @param user Address of the user to calculate rewards for
     /// @param baseAmount Base amount to calculate rewards on
     /// @return Total reward amount including all bonuses
-    /// @notice Calculates total rewards for a user including all bonuses
-    /// @dev Includes base rate, lease bonus and community bonus
-    /// @param user Address of the user to calculate rewards for
-    /// @param baseAmount Base amount to calculate rewards on
-    /// @return Total reward amount including all bonuses
     function calculateRewards(
         address user, 
         uint256 baseAmount
