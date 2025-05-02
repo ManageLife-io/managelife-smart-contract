@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -16,12 +16,14 @@ import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 ///      - Owner-controlled rebase parameters
 contract LifeToken is ERC20, Ownable {
     using SafeMath for uint256;
-
+    
+    address private _pendingOwner;
     // =============================
     // Constants
     // =============================
-    uint256 public constant MAX_SUPPLY = 5_000_000_000 * 1e18;     // 5 billion
-    uint256 public constant INITIAL_SUPPLY = 2_000_000_000 * 1e18; // Initial 2 billion
+    uint256 public constant TOKEN_UNIT = 1e18;                      // Base unit for token calculations (1e18 = 1 token)
+    uint256 public constant MAX_SUPPLY = 5e27;                      // 5 billion tokens (5e27 = 5_000_000_000 * TOKEN_UNIT)
+    uint256 public constant INITIAL_SUPPLY = 2e27;                  // Initial 2 billion tokens (2e27 = 2_000_000_000 * TOKEN_UNIT)
 
     // =============================
     // Data Structures
@@ -29,8 +31,15 @@ contract LifeToken is ERC20, Ownable {
     struct RebaseConfig {
         uint256 lastRebaseTime;   // Last rebase time
         uint256 minRebaseInterval;// Minimum interval (seconds)
-        uint256 rebaseFactor;     // Rebase factor (based on 1e18)
+        uint256 rebaseFactor;     // Rebase factor (based on TOKEN_UNIT)
     }
+
+    struct BaseBalanceRecord {
+        uint256 amount;
+        uint256 timestamp;
+    }
+
+    event BaseBalanceAdjusted(address indexed account, uint256 oldAmount, uint256 newAmount, uint256 timestamp);
 
     // =============================
     // State Variables
@@ -42,14 +51,18 @@ contract LifeToken is ERC20, Ownable {
     RebaseConfig public rebaseConfig;     // Rebase configuration
     mapping(address => bool) private _isExcludedFromRebase; // Excluded addresses list
     mapping(address => uint256) private _baseBalances;      // Base balance storage
+    mapping(address => BaseBalanceRecord[]) private _baseBalanceHistory; // Historical balance records
 
     // =============================
     // Events
     // =============================
     event Rebase(uint256 indexed epoch, uint256 oldFactor, uint256 newFactor);
+    
+    uint256 public rebaseEpoch; // Track number of rebase operations
     event RebaserUpdated(address indexed newRebaser);
     event DistributorUpdated(address indexed newDistributor);
-    event ExcludedFromRebase(address indexed account, bool excluded);
+    event ExcludedFromRebase(address indexed account, bool oldExcluded, bool newExcluded);
+    event Mint(address indexed recipient, uint256 amount);
 
     // =============================
     // Modifiers
@@ -72,8 +85,8 @@ contract LifeToken is ERC20, Ownable {
     /// @param initialOwner_ The address that will receive initial ownership and control
     constructor(address initialOwner_)
         ERC20("ManageLife Token", "Life")
+        Ownable(initialOwner_)
     {
-        _transferOwnership(initialOwner_);
         
         rebaser = initialOwner_;
         distributor = initialOwner_;
@@ -81,7 +94,7 @@ contract LifeToken is ERC20, Ownable {
         rebaseConfig = RebaseConfig({
             lastRebaseTime: block.timestamp,
             minRebaseInterval: 30 days,
-            rebaseFactor: 1e18 // 1:1
+            rebaseFactor: TOKEN_UNIT // 1:1
         });
 
         _baseBalances[address(this)] = INITIAL_SUPPLY;
@@ -98,77 +111,28 @@ contract LifeToken is ERC20, Ownable {
      */
     /// @notice Adjusts the token's supply elastically through a rebase operation
     /// @dev Can only be called by the rebaser role after minimum interval has passed
-    /// @param newFactor_ New rebase factor (1e18 based, e.g., 1.1e18 for +10%)
+    /// @param newFactor_ New rebase factor (TOKEN_UNIT based, e.g., 1.1e18 for +10%)
     function rebase(uint256 newFactor_) external onlyRebaser {
         require(
-            block.timestamp >= rebaseConfig.lastRebaseTime.add(rebaseConfig.minRebaseInterval),
+            block.timestamp >= rebaseConfig.lastRebaseTime + rebaseConfig.minRebaseInterval,
             "Rebase interval not reached"
         );
-        require(
-            newFactor_ <= 1.5e18 && newFactor_ >= 0.5e18,
-            "Factor out of allowed range (0.5x - 1.5x)"
-        );
-
+        
+        uint256 prospectiveSupply = (INITIAL_SUPPLY * newFactor_ + TOKEN_UNIT - 1) / TOKEN_UNIT; // Ceiling division without SafeMath dependency
+        require(prospectiveSupply <= MAX_SUPPLY, "Rebase would exceed MAX_SUPPLY");
+        
         uint256 oldFactor = rebaseConfig.rebaseFactor;
         rebaseConfig.rebaseFactor = newFactor_;
         rebaseConfig.lastRebaseTime = block.timestamp;
-
-        emit Rebase(block.timestamp, oldFactor, newFactor_);
+        
+        rebaseEpoch += 1;
+        emit Rebase(rebaseEpoch, oldFactor, newFactor_);
     }
-
-    /**
-     * @dev Initial token distribution
-     * @param recipients_ Array of addresses to receive tokens
-     * @param amounts_ Array of token amounts in millions (e.g., 1 = 1M tokens)
-     */
-    /// @notice Performs the initial token distribution to specified addresses
-    /// @dev Can only be called once by the distributor
-    /// @param recipients_ Array of addresses to receive tokens
-    /// @param amounts_ Array of token amounts in millions (e.g., 1 = 1M tokens)
-    function initialDistribution(
-        address[] calldata recipients_,
-        uint256[] calldata amounts_
-    ) external onlyDistributor {
-        require(!initialDistributionDone, "Distribution already completed");
-        require(recipients_.length == amounts_.length, "Array length mismatch");
-
-        uint256 totalDistributed;
-        for (uint256 i = 0; i < recipients_.length; i++) {
-            uint256 amount = amounts_[i].mul(1e6 * 1e18); // 转换为wei单位
-            _transfer(address(this), recipients_[i], amount);
-            totalDistributed = totalDistributed.add(amount);
-        }
-
-        require(totalDistributed == INITIAL_SUPPLY, "Invalid distribution total");
-        initialDistributionDone = true;
-    }
-
-    // =============================
-    // View Function
-    // =============================
     
-    /**
-     * @dev Gets the adjusted balance
-     */
-    /// @notice Returns the current balance of an account, adjusted by the rebase factor
-    /// @dev For excluded accounts, returns the base balance without rebase adjustment
-    /// @param account The address to query the balance of
-    /// @return The current balance of the account
-    function balanceOf(address account) public view override returns (uint256) {
-        if (_isExcludedFromRebase[account]) {
-            return _baseBalances[account];
-        }
-        return _baseBalances[account].mul(rebaseConfig.rebaseFactor).div(1e18);
-    }
 
-    /**
-     * @dev Gets the adjusted total supply
-     */
-    /// @notice Returns the current total supply, adjusted by the rebase factor
-    /// @dev Calculates total supply based on base supply and current rebase factor
-    /// @return The current total token supply
+    
     function totalSupply() public view override returns (uint256) {
-        return super.totalSupply().mul(rebaseConfig.rebaseFactor).div(1e18);
+        return INITIAL_SUPPLY * rebaseFactor / TOKEN_UNIT;
     }
 
     // =============================
@@ -190,13 +154,19 @@ contract LifeToken is ERC20, Ownable {
         require(senderBalance >= amount, "ERC20: transfer amount exceeds balance");
 
         // Convert to base unit
-        uint256 baseAmount = _isExcludedFromRebase[sender]
-            ? amount
-            : amount.mul(1e18).div(rebaseConfig.rebaseFactor);
+        uint256 baseAmountSender = _isExcludedFromRebase[sender]
+            ? amount  // Excluded: 1 token = 1 base unit
+            : amount.mul(rebaseConfig.rebaseFactor).div(TOKEN_UNIT);  // Non-excluded: apply rebase
+
+        uint256 baseAmountRecipient = _isExcludedFromRebase[recipient]
+            ? amount  // Excluded: 1 token = 1 base unit
+            : amount.mul(rebaseConfig.rebaseFactor).div(TOKEN_UNIT);  // Non-excluded: apply rebase
 
         // Update base balance
-        _baseBalances[sender] = _baseBalances[sender].sub(baseAmount);
-        _baseBalances[recipient] = _baseBalances[recipient].add(baseAmount);
+        _balances[msg.sender] = _balances[msg.sender].sub(amount);
+        _totalSupply = _totalSupply.sub(amount);
+        _baseBalances[sender] = _baseBalances[sender].sub(baseAmountSender);
+        _baseBalances[recipient] = _baseBalances[recipient].add(baseAmountRecipient);
 
         emit Transfer(sender, recipient, amount);
     }
@@ -227,8 +197,102 @@ contract LifeToken is ERC20, Ownable {
     /// @dev Can only be called by the contract owner
     /// @param account_ The address to exclude or include
     /// @param excluded_ True to exclude, false to include
-    function excludeFromRebase(address account_, bool excluded_) external onlyOwner {
-        _isExcludedFromRebase[account_] = excluded_;
-        emit ExcludedFromRebase(account_, excluded_);
+    function excludeFromRebase(address account_) external onlyOwner {
+        bool previousExclusion = _isExcludedFromRebase[account];
+        require(!previousExclusion, "Account already excluded");
+        _isExcludedFromRebase[account] = true;
+        emit ExcludedFromRebase(account, previousExclusion, true);
     }
+
+    function includeInRebase(address account) external onlyOwner {
+        bool previousExclusion = _isExcludedFromRebase[account];
+        require(previousExclusion, "Account not excluded");
+        _isExcludedFromRebase[account] = false;
+        emit ExcludedFromRebase(account, previousExclusion, false);
+    }
+
+    /// @notice Mints the remaining supply up to MAX_SUPPLY
+    /// @dev Can only be called by the owner
+    /// @param recipient Address to receive the minted tokens
+    function mintRemainingSupply(address recipient) external onlyOwner {
+        require(recipient != address(0), "Cannot mint to zero address");
+        uint256 currentTotal = totalSupply();
+        require(currentTotal < MAX_SUPPLY, "Max supply already minted");
+        uint256 remaining = MAX_SUPPLY - currentTotal;
+        uint256 baseAmount = _isExcludedFromRebase[recipient]
+            ? remaining  // Excluded: mint token amount directly
+            : remaining.mul(TOKEN_UNIT).div(rebaseConfig.rebaseFactor);  // Non-excluded: convert to base units
+        
+        uint256 oldBalance = _baseBalances[recipient];
+        _baseBalances[recipient] += baseAmount;
+        _logBaseBalanceChange(recipient, oldBalance, _baseBalances[recipient]);
+        
+        emit Transfer(address(0), recipient, remaining);
+        emit Mint(recipient, remaining);
+    }
+
+    /// @notice Gets historical base balance records for an account
+    /// @param account Address to check balance history for
+    /// @return Array of BaseBalanceRecord structs
+    function getBaseBalanceHistory(address account) external view returns (BaseBalanceRecord[] memory) {
+        return _baseBalanceHistory[account];
+    }
+
+    /// @notice Checks if an account is excluded from rebase
+    /// @param account Address to check exclusion status
+    /// @return Boolean indicating exclusion status
+    function isExcludedFromRebase(address account) external view returns (bool) {
+        return _isExcludedFromRebase[account];
+    }
+
+    function _logBaseBalanceChange(address account, uint256 oldAmount, uint256 newAmount) private {
+        _baseBalanceHistory[account].push(BaseBalanceRecord({
+            amount: newAmount,
+            timestamp: block.timestamp
+        }));
+        emit BaseBalanceAdjusted(account, oldAmount, newAmount, block.timestamp);
+    // =============================
+    // Security Improvements
+    // =============================
+    uint256 constant OWNERSHIP_TRANSFER_DELAY = 2 days;
+    uint256 public ownershipTransferTime;
+
+    }
+
+    event OwnershipTransferStarted(address indexed pendingOwner);
+    event OwnershipTransferCanceled(address indexed canceledOwner);
+
+    modifier onlyWhenTransferReady() {
+        require(block.timestamp >= ownershipTransferTime, "Transfer delay not passed");
+        _;
+    }
+
+/// @notice Initiates ownership transfer to new owner
+/// @dev Starts 2-day transfer timer
+function transferOwnership(address newOwner) public override onlyOwner {
+    require(newOwner != address(0), "Invalid address");
+    _pendingOwner = newOwner;
+    ownershipTransferTime = block.timestamp + OWNERSHIP_TRANSFER_DELAY;
+    emit OwnershipTransferStarted(newOwner);
+}
+
+/// @notice Completes ownership transfer after delay
+function acceptOwnership() external onlyWhenTransferReady {
+    require(msg.sender == _pendingOwner, "Caller not pending owner");
+    _transferOwnership(_pendingOwner);
+    _pendingOwner = address(0);
+    ownershipTransferTime = 0;
+}
+
+/// @notice Cancels pending ownership transfer
+function cancelOwnershipTransfer() external onlyOwner {
+    require(_pendingOwner != address(0), "No pending transfer");
+    emit OwnershipTransferCanceled(_pendingOwner);
+    _pendingOwner = address(0);
+    ownershipTransferTime = 0;
+}
+
+//@audit Disable dangerous renouncement function
+function renounceOwnership() public view override onlyOwner {
+    revert("Ownership renunciation disabled");
 }

@@ -1,13 +1,25 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "../../libraries/StakingConstants.sol";
 
 contract DynamicRewards is AccessControl, ReentrancyGuard {
+    bool private _paused;
+
+    modifier whenNotPaused() {
+        require(!_paused, "Contract is paused");
+        _;
+    }
     using SafeMath for uint256;
+    
+    // ================== Constants ==================
+    uint256 public constant TOKEN_UNIT = 1e18; // Precision unit for token calculations
+    uint256 public constant MULTIPLIER = 1e18; // Multiplier for reward calculations
+    uint256 public constant PERCENTAGE_BASE = 10000; // Base for percentage calculations (100% = 10000)
 
     bytes32 public constant REWARD_MANAGER = keccak256("REWARD_MANAGER");
     
@@ -22,6 +34,12 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
     IERC20 public immutable stakingToken;
     uint256 private _totalSupply;
     mapping(address => uint256) private _balances;
+    mapping(address => uint256) private _snapshotBalances;
+    mapping(address => uint256) private _stakeTimestamps;
+
+    uint256 public constant MIN_STAKING_PERIOD = StakingConstants.MIN_STAKING_PERIOD;
+    uint256 public minStakingPeriod = MIN_STAKING_PERIOD;
+    event MinStakingPeriodUpdated(uint256 newPeriod);
 
     mapping(uint256 => RewardSchedule) public rewardSchedules;
     uint256 public currentScheduleId;
@@ -31,9 +49,16 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
     event Withdrawn(address indexed user, uint256 amount);
     event RewardScheduleAdded(uint256 scheduleId);
     event RewardClaimed(address indexed user, uint256 amount, address token);
+    
+    function setMinStakingPeriod(uint256 period) external onlyRole(REWARD_MANAGER) {
+        minStakingPeriod = period;
+        emit MinStakingPeriodUpdated(period);
+    }
 
     constructor(address _stakingToken, address admin) {
         require(_stakingToken != address(0), "Invalid staking token");
+        require(admin != address(0), "Invalid admin address");
+        _paused = false;
         stakingToken = IERC20(_stakingToken);
         
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -41,24 +66,27 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
     }
 
     // ================== Core Functions ==================
-    function stake(uint256 amount) external nonReentrant {
+    function stake(uint256 amount) external nonReentrant whenNotPaused updateReward(msg.sender) {
         require(amount > 0, "Amount must be > 0");
         _updateRewards(msg.sender);
         
         _totalSupply = _totalSupply.add(amount);
         _balances[msg.sender] = _balances[msg.sender].add(amount);
+        _stakeTimestamps[msg.sender] = block.timestamp;
         
         bool success = stakingToken.transferFrom(msg.sender, address(this), amount);
         require(success, "Transfer failed");
         emit Staked(msg.sender, amount);
     }
 
-    function withdraw(uint256 amount) external nonReentrant {
+    function withdraw(uint256 amount) external nonReentrant whenNotPaused updateReward(msg.sender) {
+        require(block.timestamp >= _stakeTimestamps[msg.sender] + minStakingPeriod, "Minimum staking period not met");
         require(amount > 0, "Amount must be > 0");
         require(_balances[msg.sender] >= amount, "Insufficient balance");
         
         _updateRewards(msg.sender);
         _totalSupply = _totalSupply.sub(amount);
+        _snapshotBalances[msg.sender] = _balances[msg.sender];
         _balances[msg.sender] = _balances[msg.sender].sub(amount);
         
         bool success = stakingToken.transfer(msg.sender, amount);
@@ -93,6 +121,24 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
     }
 
     // ================== Reward Calculation ==================
+    uint256 public lastUpdateTime;
+    uint256 public rewardPerTokenStored;
+    mapping(address => uint256) public rewards;
+    mapping(address => uint256) public userRewardPerTokenPaid;
+
+    modifier updateReward(address account) {
+        uint256 currentRewardPerToken = rewardPerToken();
+        rewardPerTokenStored = currentRewardPerToken;
+        lastUpdateTime = block.timestamp;
+        
+        if (account != address(0)) {
+            rewards[account] = earned(account);
+            userRewardPerTokenPaid[account] = currentRewardPerToken;
+            _snapshotBalances[account] = _balances[account];
+        }
+        _;
+    }
+
     function earned(address account) public view returns (uint256 total) {
         for (uint256 i = 1; i <= currentScheduleId; i++) {
             total = total.add(_earnedPerSchedule(account, i));
@@ -101,20 +147,26 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
 
     function _earnedPerSchedule(address account, uint256 scheduleId) private view returns (uint256) {
         RewardSchedule storage schedule = rewardSchedules[scheduleId];
-        if (_balances[account] == 0 || block.timestamp < schedule.startTime) return 0;
-
-        uint256 timeElapsed = block.timestamp.sub(schedule.startTime);
+        if (_snapshotBalances[account] == 0 || block.timestamp < schedule.startTime) return 0;
+    
+        // 新增的边界检查
         uint256 totalDuration = schedule.endTime.sub(schedule.startTime);
-        uint256 multiplier = timeElapsed.mul(1e18).div(totalDuration);
-
-        uint256 availableRewards = schedule.totalRewards.sub(schedule.claimedRewards);
+        require(totalDuration > 0, "Invalid schedule duration");
+        
+        uint256 timeElapsed = block.timestamp.sub(schedule.startTime);
+        if (timeElapsed > totalDuration) { // 时间上限检查
+            timeElapsed = totalDuration;
+        }
+    
+        uint256 multiplier = timeElapsed.mul(MULTIPLIER).div(totalDuration);
+        uint256 availableRewards = schedule.totalRewards.mul(timeElapsed).div(totalDuration);
         uint256 userShare = _balances[account].mul(multiplier).div(_totalSupply);
         
-        return availableRewards.mul(userShare).div(1e18).sub(_userAccrued[account][scheduleId]);
+        return availableRewards.mul(userShare).div(TOKEN_UNIT).sub(_userAccrued[account][scheduleId]);
     }
 
     // ================== Reward Claiming ==================
-    function claimRewards() external nonReentrant {
+    function claimRewards() external nonReentrant whenNotPaused {
         _updateRewards(msg.sender);
         
         uint256 totalClaimed = 0;
@@ -124,11 +176,7 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
             if (amount == 0) continue;
 
             // Security checks
-            require(
-                schedule.claimedRewards.add(amount) <= schedule.totalRewards,
-                "Over claimed"
-            );
-            
+            require(amount > 0, "Nothing to claim");
             _userAccrued[msg.sender][i] = 0;
             schedule.claimedRewards = schedule.claimedRewards.add(amount);
             
@@ -143,7 +191,10 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
     // ================== Internal Functions ==================
     function _updateRewards(address account) internal {
         for (uint256 i = 1; i <= currentScheduleId; i++) {
-            _userAccrued[account][i] = _userAccrued[account][i].add(_earnedPerSchedule(account, i));
+            // Only update rewards if the schedule is still active
+            if (block.timestamp < rewardSchedules[i].endTime) {
+                _userAccrued[account][i] = _userAccrued[account][i].add(_earnedPerSchedule(account, i));
+            }
         }
     }
 
@@ -154,6 +205,15 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         );
         bool success = IERC20(token).transfer(to, amount);
         require(success, "Transfer failed");
+    }
+
+    // ================== Pause Functions ==================
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _paused = true;
+    }
+
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _paused = false;
     }
 
     // ================== View Functions ==================

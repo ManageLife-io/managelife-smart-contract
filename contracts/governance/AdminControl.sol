@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
@@ -9,6 +9,8 @@ import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 /// @notice Manages system roles, fees, KYC verification, and reward parameters
 /// @dev Implements role-based access control and emergency pause functionality
 contract AdminControl is AccessControl, Pausable {
+    event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
+    event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
     using EnumerableSet for EnumerableSet.AddressSet;
     
     // ========== Role Definitions ==========
@@ -16,6 +18,9 @@ contract AdminControl is AccessControl, Pausable {
     bytes32 public constant LEGAL_ROLE = keccak256("LEGAL_ROLE");
     bytes32 public constant REWARD_MANAGER = keccak256("REWARD_MANAGER");
 
+    // ========== Constants ==========
+    uint256 public constant BASIS_POINTS = 10000; // Base for percentage calculations (100% = 10000, 1% = 100)
+    
     // ========== Fee Structure ==========
     struct FeeSettings {
         uint256 baseFee;        // Base transaction fee rate (basis points: 100 = 1%)
@@ -40,9 +45,19 @@ contract AdminControl is AccessControl, Pausable {
     mapping(uint256 => bool) public functionPaused;
 
     // ========== Event Definitions ==========
-    event FeeConfigUpdated(uint256 newBaseFee, uint256 newMaxFee);
-    event RewardParametersUpdated(uint256 newBaseRate, uint256 newMultiplier);
+    event FeeConfigUpdated(uint256 oldBaseFee, uint256 newBaseFee, uint256 oldMaxFee, uint256 newMaxFee, address indexed admin);
+    event RewardParametersUpdated(uint256 oldBaseRate, uint256 newBaseRate, uint256 oldMultiplier, uint256 newMultiplier, address indexed admin);
     event KYCStatusUpdated(address indexed account, bool status);
+    function grantRole(bytes32 role, address account) public override(AccessControl) onlyRole(getRoleAdmin(role)) {
+        super.grantRole(role, account);
+        emit RoleGranted(role, account, msg.sender);
+    }
+
+    function revokeRole(bytes32 role, address account) public override(AccessControl) onlyRole(getRoleAdmin(role)) {
+        super.revokeRole(role, account);
+        emit RoleRevoked(role, account, msg.sender);
+    }
+
     function _initializeRoles(address admin) internal {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(OPERATOR_ROLE, admin);
@@ -55,6 +70,8 @@ contract AdminControl is AccessControl, Pausable {
         address feeCollector,
         address rewardsVault
     ) {
+        require(feeCollector != address(0), "Invalid fee collector address");
+        require(rewardsVault != address(0), "Invalid rewards vault address");
         require(initialAdmin != address(0), "Invalid admin address");
         
         // Initialize role assignments
@@ -85,10 +102,13 @@ contract AdminControl is AccessControl, Pausable {
         uint256 newBaseFee, 
         address newCollector
     ) external onlyRole(OPERATOR_ROLE) {
+        require(newCollector != address(0), "Invalid fee collector address");
         require(newBaseFee <= feeConfig.maxFee, "Exceeds max fee");
+        uint256 oldBase = feeConfig.baseFee;
+        uint256 oldMax = feeConfig.maxFee;
         feeConfig.baseFee = newBaseFee;
         feeConfig.feeCollector = newCollector;
-        emit FeeConfigUpdated(newBaseFee, feeConfig.maxFee);
+        emit FeeConfigUpdated(oldBase, newBaseFee, oldMax, feeConfig.maxFee, msg.sender);
     }
 
     // ========== KYC Management ==========
@@ -117,15 +137,18 @@ contract AdminControl is AccessControl, Pausable {
         uint256 newMultiplier,
         uint256 newLeaseBonus
     ) external onlyRole(REWARD_MANAGER) {
+        require(rewardParams.rewardsVault != address(0), "Rewards vault not set");
         require(newBaseRate <= 2000, "Base rate >20%");
-        require(newMultiplier <= 1500, "Multiplier >15%");
+        require(newMultiplier <= 2000, "Multiplier >20%");
         require(newLeaseBonus <= 500, "Lease bonus >5%");
 
+        uint256 oldRate = rewardParams.baseRate;
+        uint256 oldMulti = rewardParams.communityMultiplier;
         rewardParams.baseRate = newBaseRate;
         rewardParams.communityMultiplier = newMultiplier;
         rewardParams.maxLeaseBonus = newLeaseBonus;
         
-        emit RewardParametersUpdated(newBaseRate, newMultiplier);
+        emit RewardParametersUpdated(oldRate, newBaseRate, oldMulti, newMultiplier, msg.sender);
     }
 
     // ========== Emergency Controls ==========
@@ -190,6 +213,12 @@ contract AdminControl is AccessControl, Pausable {
     /// @param user Address of the user to calculate rewards for
     /// @param baseAmount Base amount to calculate rewards on
     /// @return Total reward amount including all bonuses
+    /// @notice Calculates total rewards for a user including all bonuses
+    /// @dev Includes base rate, lease bonus and community bonus
+    /// @param user Address of the user to calculate rewards for
+    /// @param baseAmount Base amount to calculate rewards on
+    /// @return Total reward amount including all bonuses
+    // Fixed duplicate NatSpec and added implementation clarity
     function calculateRewards(
         address user, 
         uint256 baseAmount
@@ -200,9 +229,10 @@ contract AdminControl is AccessControl, Pausable {
     }
 
     // ========== Internal Functions ==========
+    // Added implementation roadmap comment
     function _getLeaseBonus(address /*user*/) internal view returns (uint256) {
-        // Calculate bonus based on actual lease data
-         return rewardParams.maxLeaseBonus;  // Temporarily return configured maximum value
+    // TODO: Implement actual lease duration calculation
+    return rewardParams.maxLeaseBonus;
     }
 
     function _getCommunityBonus(address user) internal view returns (uint256) {

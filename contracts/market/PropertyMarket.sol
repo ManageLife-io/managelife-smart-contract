@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.20;
 
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -11,6 +11,9 @@ import "../governance/AdminControl.sol";
 /// @dev Implements a secure marketplace with support for both direct purchases and bidding
 /// @custom:security-contact security@example.com
 contract PropertyMarket is ReentrancyGuard {
+    // ========== Constants ==========
+    uint256 public constant PERCENTAGE_BASE = 10000; // Base for percentage calculations (100% = 10000)
+    
     // ========== Data Structures ==========
     enum PropertyStatus { LISTED, RENTED, SOLD, DELISTED }    
     
@@ -38,11 +41,16 @@ contract PropertyMarket is ReentrancyGuard {
     IERC721 public immutable nftiContract;
     IERC721 public immutable nftmContract;
     
+    // Token whitelist for payments
+    mapping(address => bool) public allowedPaymentTokens;
+    bool public whitelistEnabled = true; // Enable/disable whitelist functionality
+    
     mapping(uint256 => PropertyListing) public listings;
     mapping(address => mapping(uint256 => uint256)) public leaseTerms;
     
     // Bidding related mappings
     mapping(uint256 => Bid[]) public bidsForToken; // tokenId => all bids
+    mapping(uint256 => mapping(address => uint256)) public ethBidDeposits; // tokenId => bidder => ETH amount
     mapping(address => mapping(uint256 => uint256)) public bidIndexByBidder; // bidder => tokenId => bidIndex+1 (0 means no bid)
 
     // ========== Event Definitions ==========
@@ -87,6 +95,11 @@ contract PropertyMarket is ReentrancyGuard {
         address indexed bidder,
         uint256 amount
     );
+    
+    // Token whitelist events
+    event PaymentTokenAdded(address indexed token, address indexed operator);
+    event PaymentTokenRemoved(address indexed token, address indexed operator);
+    event WhitelistStatusChanged(bool enabled, address indexed operator);
 
     // ========== Constructor ==========
     constructor(
@@ -97,6 +110,46 @@ contract PropertyMarket is ReentrancyGuard {
         adminControl = AdminControl(_adminControl);
         nftiContract = IERC721(_nftiAddress);
         nftmContract = IERC721(_nftmAddress);
+        
+        // Add ETH as default allowed payment method
+        allowedPaymentTokens[address(0)] = true;
+    }
+    
+    // ========== Token Whitelist Management ==========
+    
+    /// @notice Checks if a token is allowed for payment
+    /// @dev Returns true for ETH (address 0) if it's in the whitelist
+    /// @param token The token address to check
+    /// @return bool True if the token is allowed for payment
+    function isTokenAllowed(address token) public view returns (bool) {
+        if (!whitelistEnabled) return true;
+        return allowedPaymentTokens[token];
+    }
+    
+    /// @notice Adds a token to the allowed payment tokens list
+    /// @dev Only callable by operators
+    /// @param token The token address to add
+    function addAllowedToken(address token) external onlyOperator {
+        require(token != address(0), "ETH is allowed by default");
+        allowedPaymentTokens[token] = true;
+        emit PaymentTokenAdded(token, msg.sender);
+    }
+    
+    /// @notice Removes a token from the allowed payment tokens list
+    /// @dev Only callable by operators
+    /// @param token The token address to remove
+    function removeAllowedToken(address token) external onlyOperator {
+        require(token != address(0), "Cannot remove ETH as payment method");
+        allowedPaymentTokens[token] = false;
+        emit PaymentTokenRemoved(token, msg.sender);
+    }
+    
+    /// @notice Enables or disables the token whitelist functionality
+    /// @dev Only callable by operators
+    /// @param enabled Whether the whitelist should be enabled
+    function setWhitelistEnabled(bool enabled) external onlyOperator {
+        whitelistEnabled = enabled;
+        emit WhitelistStatusChanged(enabled, msg.sender);
     }
 
     // ========== Core Functions ==========
@@ -121,6 +174,11 @@ contract PropertyMarket is ReentrancyGuard {
         );
         
         require(price > 0, "Invalid price");
+        
+        require(
+            isTokenAllowed(paymentToken),
+            "Payment token not allowed"
+        );
 
         listings[tokenId] = PropertyListing({
             tokenId: tokenId,
@@ -160,18 +218,25 @@ contract PropertyMarket is ReentrancyGuard {
             "Payment failed"
         );
 
+        // First update state variables (Effects)
+        listing.status = PropertyStatus.SOLD;
+        
+        // Cancel all active bids on direct purchase
+        _cancelAllBids(tokenId);
+        
+        // Then process payment and external calls (Interactions)
         _processPayment(
             listing.seller,
             listing.price,
             listing.paymentToken
         );
 
-        nftiContract.transferFrom(
+        nftiContract.safeTransferFrom(
             listing.seller,
             msg.sender,
-            tokenId
+            tokenId,
+            ""
         );
-        listing.status = PropertyStatus.SOLD;
         
         emit PropertySold(
             tokenId,
@@ -181,12 +246,28 @@ contract PropertyMarket is ReentrancyGuard {
         );
     }
 
+    function _cancelAllBids(uint256 tokenId) private {
+        Bid[] storage bids = bidsForToken[tokenId];
+        for (uint256 i = 0; i < bids.length; i++) {
+            if (bids[i].isActive) {
+                bids[i].isActive = false;
+                bidIndexByBidder[bids[i].bidder][tokenId] = 0;
+                emit BidCancelled(tokenId, bids[i].bidder, bids[i].amount);
+            }
+        }
+    }
+
     // ========== Payment Processing Functions ==========
     function _validatePayment(
         uint256 listedPrice,
         uint256 offerPrice,
         address paymentToken
     ) private view returns (bool) {
+        // Validate that the payment token is allowed
+        if (!isTokenAllowed(paymentToken)) {
+            return false;
+        }
+        
         if (paymentToken == address(0)) {
             return msg.value >= listedPrice && offerPrice == listedPrice;
         } else {
@@ -200,18 +281,21 @@ contract PropertyMarket is ReentrancyGuard {
         address paymentToken
     ) internal {
         (uint256 baseFee,, address feeCollector) = adminControl.feeConfig();
-        uint256 fees = (price * baseFee) / 10000;
+        uint256 fees = (price * baseFee) / PERCENTAGE_BASE;
         uint256 netValue = price - fees;
 
         if (paymentToken == address(0)) {
             require(msg.value >= price, "Insufficient ETH");
             
             if (msg.value > price) {
-                payable(msg.sender).transfer(msg.value - price);
+                (bool success, ) = payable(msg.sender).call{value: msg.value - price, gas: 2300}("");
+require(success, "ETH refund failed");
             }
             
-            payable(seller).transfer(netValue);
-            payable(feeCollector).transfer(fees);
+            (bool successSeller, ) = payable(seller).call{value: netValue, gas: 2300}("");
+require(successSeller, "Seller transfer failed");
+(bool successFee, ) = payable(feeCollector).call{value: fees, gas: 2300}("");
+require(successFee, "Fee transfer failed");
         } else {
             IERC20 token = IERC20(paymentToken);
             require(
@@ -242,6 +326,9 @@ contract PropertyMarket is ReentrancyGuard {
             "Not active listing"
         );
 
+        require(newPrice > 0, "Invalid price");
+        require(isTokenAllowed(newPaymentToken), "Payment token not allowed");
+        
         listing.price = newPrice;
         listing.paymentToken = newPaymentToken;
         listing.lastRenewed = block.timestamp;
@@ -302,30 +389,54 @@ contract PropertyMarket is ReentrancyGuard {
     /// @param tokenId The ID of the NFT to bid on
     /// @param bidAmount The amount to bid
     /// @param paymentToken The token address for payment (address(0) for ETH)
-    function placeBid(uint256 tokenId, uint256 bidAmount, address paymentToken) external nonReentrant {
+    // Add new constant for minimum bid increment (5%)
+    uint256 public constant MIN_BID_INCREMENT_PERCENT = 5;
+    
+    function placeBid(uint256 tokenId, uint256 bidAmount, address paymentToken) external payable nonReentrant {
         PropertyListing storage listing = listings[tokenId];
         require(listing.status == PropertyStatus.LISTED, "Property not listed");
         require(listing.seller != msg.sender, "Cannot bid on your own listing");
         require(bidAmount > 0, "Bid amount must be greater than 0");
         require(adminControl.isKYCVerified(msg.sender), "KYC required");
+        require(isTokenAllowed(paymentToken), "Payment token not allowed");
         
         // Check if bid exists and update if it does
         uint256 existingBidIndex = bidIndexByBidder[msg.sender][tokenId];
         
         // Handle token approval
-        if (paymentToken != address(0)) {
+        // Validate payment method
+        if (paymentToken == address(0)) {
+            require(msg.value == bidAmount, "ETH amount mismatch");
+            ethBidDeposits[tokenId][msg.sender] += msg.value;
+        } else {
             IERC20 token = IERC20(paymentToken);
-            // Check allowance
             uint256 allowance = token.allowance(msg.sender, address(this));
             require(allowance >= bidAmount, "Insufficient token allowance");
         }
         
+        require(bidAmount >= listing.price, "Bid must meet listing price");
+        
+        // Find highest active bid
+        uint256 highestBid = 0;
+        Bid[] storage bids = bidsForToken[tokenId];
+        for (uint256 i = 0; i < bids.length; i++) {
+            if (bids[i].isActive && bids[i].amount > highestBid) {
+                highestBid = bids[i].amount;
+            }
+        }
+        
+        if (highestBid > 0) {
+            uint256 minBid = highestBid * (100 + MIN_BID_INCREMENT_PERCENT) / 100;
+            require(bidAmount >= minBid, "Bid must be 5% higher than current highest");
+        }
+        
         if (existingBidIndex > 0) {
-            // Update existing bid
             Bid storage existingBid = bidsForToken[tokenId][existingBidIndex - 1];
             require(existingBid.isActive, "Bid is not active");
+            require(existingBid.paymentToken == paymentToken, "Cannot change payment token");
+            uint256 minIncrement = existingBid.amount * (100 + MIN_BID_INCREMENT_PERCENT) / 100;
+            require(bidAmount >= minIncrement, "Bid must be 5% higher than previous");
             existingBid.amount = bidAmount;
-            existingBid.paymentToken = paymentToken;
             existingBid.bidTimestamp = block.timestamp;
         } else {
             // Create new bid
@@ -354,29 +465,45 @@ contract PropertyMarket is ReentrancyGuard {
     /// @dev Transfers NFT to bidder and handles payment to seller
     /// @param tokenId The ID of the NFT
     /// @param bidder The address of the bidder whose bid to accept
-    function acceptBid(uint256 tokenId, address bidder) external nonReentrant {
+    function acceptBid(uint256 tokenId, uint256 bidIndex, address expectedBidder, uint256 expectedAmount, address expectedPaymentToken) external nonReentrant {
         PropertyListing storage listing = listings[tokenId];
         require(listing.status == PropertyStatus.LISTED, "Property not listed");
         require(listing.seller == msg.sender, "Not the seller");
         
-        uint256 bidIndex = bidIndexByBidder[bidder][tokenId];
-        require(bidIndex > 0, "No bid from this bidder");
+        require(bidIndex > 0, "Invalid bid index");
+        require(bidsForToken[tokenId].length >= bidIndex, "Invalid bid index");
         
         Bid storage acceptedBid = bidsForToken[tokenId][bidIndex - 1];
         require(acceptedBid.isActive, "Bid is not active");
+        require(acceptedBid.bidder == expectedBidder, "Bidder mismatch");
+        require(acceptedBid.amount == expectedAmount, "Amount mismatch");
+        require(acceptedBid.paymentToken == expectedPaymentToken, "Token mismatch");
         
         // Verify NFT ownership
         require(nftiContract.ownerOf(tokenId) == msg.sender, "Not NFT owner");
         
-        // Process payment
+        // First update state variables (Effects)
+        listing.status = PropertyStatus.SOLD;
+        acceptedBid.isActive = false;
+        
+        // Calculate payment details
         (uint256 baseFee,, address feeCollector) = adminControl.feeConfig();
         uint256 fees = (acceptedBid.amount * baseFee) / 10000;
         uint256 netValue = acceptedBid.amount - fees;
         
+        // Then process payment and external calls (Interactions)
         if (acceptedBid.paymentToken == address(0)) {
             // ETH payment - requires buyer to send ETH
             // ETH transfer not handled here as we use pre-authorization model
-            revert("ETH bids not supported in this version");
+            uint256 ethBalance = ethBidDeposits[tokenId][acceptedBid.bidder];
+            require(ethBalance >= acceptedBid.amount, "Insufficient ETH escrow");
+            
+            // Update state before external calls
+            ethBidDeposits[tokenId][acceptedBid.bidder] = 0;
+            
+            // Make external calls
+            payable(msg.sender).transfer(netValue);
+            payable(feeCollector).transfer(fees);
         } else {
             // ERC20 token payment
             IERC20 token = IERC20(acceptedBid.paymentToken);
@@ -394,12 +521,8 @@ contract PropertyMarket is ReentrancyGuard {
             );
         }
         
-        // Transfer NFT
-        nftiContract.transferFrom(msg.sender, acceptedBid.bidder, tokenId);
-        
-        // Update status
-        listing.status = PropertyStatus.SOLD;
-        acceptedBid.isActive = false;
+        // Transfer NFT (last external interaction)
+        nftiContract.safeTransferFrom(msg.sender, acceptedBid.bidder, tokenId, "");
         
         // Clear all other bids for this NFT
         _clearAllBidsExcept(tokenId, bidIndex - 1);
@@ -430,6 +553,15 @@ contract PropertyMarket is ReentrancyGuard {
         
         bid.isActive = false;
         bidIndexByBidder[msg.sender][tokenId] = 0;
+
+        // Refund ETH if applicable
+        if (bid.paymentToken == address(0)) {
+            uint256 ethAmount = ethBidDeposits[tokenId][msg.sender];
+            require(ethAmount >= bid.amount, "Insufficient ETH escrow");
+            (bool success, ) = payable(msg.sender).call{value: bid.amount, gas: 2300}("");
+require(success, "Bid refund failed");
+            ethBidDeposits[tokenId][msg.sender] = 0;
+        }
         
         emit BidCancelled(tokenId, msg.sender, bid.amount);
     }
@@ -505,4 +637,26 @@ contract PropertyMarket is ReentrancyGuard {
             }
         }
     }
+}
+
+function acceptBid(
+    uint256 tokenId,
+    uint256 bidIndex,
+    address expectedBidder,
+    uint256 expectedAmount,
+    address expectedPaymentToken
+) external nonReentrant {
+    PropertyListing storage listing = listings[tokenId];
+    require(listing.status == PropertyStatus.LISTED, "Property not listed");
+    require(msg.sender == listing.seller, "Not seller");
+    
+    Bid storage acceptedBid = bidsForToken[tokenId][bidIndex - 1];
+    
+    // Validate bid parameters match expectations
+    require(acceptedBid.isActive, "Bid not active");
+    require(acceptedBid.bidder == expectedBidder, "Bidder mismatch");
+    require(acceptedBid.amount == expectedAmount, "Bid amount mismatch");
+    require(acceptedBid.paymentToken == expectedPaymentToken, "Payment token mismatch");
+
+    // ... rest of existing implementation ...
 }
