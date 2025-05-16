@@ -52,6 +52,9 @@ contract LifeToken is ERC20, Ownable {
     mapping(address => bool) private _isExcludedFromRebase; // Excluded addresses list
     mapping(address => uint256) private _baseBalances;      // Base balance storage
     mapping(address => BaseBalanceRecord[]) private _baseBalanceHistory; // Historical balance records
+    
+    // 跟踪所有被排除在rebase外的地址的总基础余额
+    uint256 private _excludedFromRebaseTotal;
 
     // =============================
     // Events
@@ -85,8 +88,9 @@ contract LifeToken is ERC20, Ownable {
     /// @param initialOwner_ The address that will receive initial ownership and control
     constructor(address initialOwner_)
         ERC20("ManageLife Token", "Life")
-        Ownable(initialOwner_)
+        Ownable()
     {
+        require(initialOwner_ != address(0), "Zero address not allowed");
         
         rebaser = initialOwner_;
         distributor = initialOwner_;
@@ -129,10 +133,21 @@ contract LifeToken is ERC20, Ownable {
         emit Rebase(rebaseEpoch, oldFactor, newFactor_);
     }
     
-
-    
+    /**
+     * @dev 获取调整后的总供应量，修复了计算错误
+     * 正确计算总供应量 = 参与rebase部分的代币 + 不参与rebase部分的代币
+     * 参与rebase部分 = (INITIAL_SUPPLY - 排除地址持有的基础余额总和) * rebaseFactor / TOKEN_UNIT
+     * 不参与rebase部分 = 排除地址持有的基础余额总和
+     */
     function totalSupply() public view override returns (uint256) {
-        return INITIAL_SUPPLY * rebaseFactor / TOKEN_UNIT;
+        uint256 rebaseFactor = rebaseConfig.rebaseFactor;
+        
+        // 计算参与rebase的代币供应量（去除了排除地址持有的部分）
+        uint256 nonExcludedSupply = INITIAL_SUPPLY.sub(_excludedFromRebaseTotal);
+        uint256 rebasedSupply = nonExcludedSupply.mul(rebaseFactor).div(TOKEN_UNIT);
+        
+        // 总供应量 = rebase影响的部分 + 排除地址持有的代币数量
+        return rebasedSupply.add(_excludedFromRebaseTotal);
     }
 
     // =============================
@@ -149,25 +164,36 @@ contract LifeToken is ERC20, Ownable {
     ) internal virtual override {
         require(sender != address(0), "ERC20: transfer from the zero address");
         require(recipient != address(0), "ERC20: transfer to the zero address");
-
+    
         uint256 senderBalance = balanceOf(sender);
         require(senderBalance >= amount, "ERC20: transfer amount exceeds balance");
-
+    
         // Convert to base unit
         uint256 baseAmountSender = _isExcludedFromRebase[sender]
             ? amount  // Excluded: 1 token = 1 base unit
             : amount.mul(rebaseConfig.rebaseFactor).div(TOKEN_UNIT);  // Non-excluded: apply rebase
-
+    
         uint256 baseAmountRecipient = _isExcludedFromRebase[recipient]
             ? amount  // Excluded: 1 token = 1 base unit
             : amount.mul(rebaseConfig.rebaseFactor).div(TOKEN_UNIT);  // Non-excluded: apply rebase
-
+    
+        // 调整排除账户的总余额跟踪
+        if (_isExcludedFromRebase[sender] && !_isExcludedFromRebase[recipient]) {
+            // 从排除名单中转出到非排除名单
+            _excludedFromRebaseTotal = _excludedFromRebaseTotal.sub(baseAmountSender);
+        } else if (!_isExcludedFromRebase[sender] && _isExcludedFromRebase[recipient]) {
+            // 从非排除名单转入到排除名单
+            _excludedFromRebaseTotal = _excludedFromRebaseTotal.add(baseAmountRecipient);
+        } else if (_isExcludedFromRebase[sender] && _isExcludedFromRebase[recipient]) {
+            // 两者都在排除名单，净影响是sender减少，recipient增加
+            _excludedFromRebaseTotal = _excludedFromRebaseTotal.sub(baseAmountSender).add(baseAmountRecipient);
+        }
+    
         // Update base balance
-        _balances[msg.sender] = _balances[msg.sender].sub(amount);
-        _totalSupply = _totalSupply.sub(amount);
+        super._transfer(sender, recipient, amount);
         _baseBalances[sender] = _baseBalances[sender].sub(baseAmountSender);
         _baseBalances[recipient] = _baseBalances[recipient].add(baseAmountRecipient);
-
+    
         emit Transfer(sender, recipient, amount);
     }
 
@@ -193,20 +219,32 @@ contract LifeToken is ERC20, Ownable {
         emit DistributorUpdated(newDistributor_);
     }
 
-    /// @notice Excludes or includes an account from rebase effects
+    /// @notice Excludes an account from rebase effects
     /// @dev Can only be called by the contract owner
-    /// @param account_ The address to exclude or include
-    /// @param excluded_ True to exclude, false to include
+    /// @param account_ The address to exclude from rebase
     function excludeFromRebase(address account_) external onlyOwner {
-        bool previousExclusion = _isExcludedFromRebase[account];
+        require(account_ != address(0), "Zero address not allowed");
+        bool previousExclusion = _isExcludedFromRebase[account_];
         require(!previousExclusion, "Account already excluded");
-        _isExcludedFromRebase[account] = true;
-        emit ExcludedFromRebase(account, previousExclusion, true);
+        
+        // 更新排除账户的基础余额总和
+        _excludedFromRebaseTotal = _excludedFromRebaseTotal.add(_baseBalances[account_]);
+        
+        _isExcludedFromRebase[account_] = true;
+        emit ExcludedFromRebase(account_, previousExclusion, true);
     }
 
+    /// @notice Includes an account in rebase effects
+    /// @dev Can only be called by the contract owner
+    /// @param account The address to include in rebase
     function includeInRebase(address account) external onlyOwner {
+        require(account != address(0), "Zero address not allowed");
         bool previousExclusion = _isExcludedFromRebase[account];
         require(previousExclusion, "Account not excluded");
+        
+        // 从排除账户的基础余额总和中减去
+        _excludedFromRebaseTotal = _excludedFromRebaseTotal.sub(_baseBalances[account]);
+        
         _isExcludedFromRebase[account] = false;
         emit ExcludedFromRebase(account, previousExclusion, false);
     }
@@ -225,6 +263,12 @@ contract LifeToken is ERC20, Ownable {
         
         uint256 oldBalance = _baseBalances[recipient];
         _baseBalances[recipient] += baseAmount;
+        
+        // 如果接收者是排除在rebase外的地址，需要更新排除地址的总余额
+        if (_isExcludedFromRebase[recipient]) {
+            _excludedFromRebaseTotal = _excludedFromRebaseTotal.add(baseAmount);
+        }
+        
         _logBaseBalanceChange(recipient, oldBalance, _baseBalances[recipient]);
         
         emit Transfer(address(0), recipient, remaining);
@@ -235,6 +279,7 @@ contract LifeToken is ERC20, Ownable {
     /// @param account Address to check balance history for
     /// @return Array of BaseBalanceRecord structs
     function getBaseBalanceHistory(address account) external view returns (BaseBalanceRecord[] memory) {
+        require(account != address(0), "Zero address not allowed");
         return _baseBalanceHistory[account];
     }
 
@@ -242,57 +287,69 @@ contract LifeToken is ERC20, Ownable {
     /// @param account Address to check exclusion status
     /// @return Boolean indicating exclusion status
     function isExcludedFromRebase(address account) external view returns (bool) {
+        require(account != address(0), "Zero address not allowed");
         return _isExcludedFromRebase[account];
     }
 
+    /// @notice 获取被排除在rebase外的地址的基础余额总和
+    /// @return 排除地址的基础余额总和
+    function getExcludedFromRebaseTotal() external view returns (uint256) {
+        return _excludedFromRebaseTotal;
+    }
+
+    uint256 constant OWNERSHIP_TRANSFER_DELAY = 2 * 86400;
+    uint256 public ownershipTransferTime;
+
     function _logBaseBalanceChange(address account, uint256 oldAmount, uint256 newAmount) private {
-        _baseBalanceHistory[account].push(BaseBalanceRecord({
+        // Ensure closure correctness by capturing all required state
+        BaseBalanceRecord[] storage records = _baseBalanceHistory[account];
+        records.push(BaseBalanceRecord({
             amount: newAmount,
             timestamp: block.timestamp
         }));
         emit BaseBalanceAdjusted(account, oldAmount, newAmount, block.timestamp);
+    }
     // =============================
     // Security Improvements
     // =============================
-    uint256 constant OWNERSHIP_TRANSFER_DELAY = 2 days;
-    uint256 public ownershipTransferTime;
-
-    }
 
     event OwnershipTransferStarted(address indexed pendingOwner);
     event OwnershipTransferCanceled(address indexed canceledOwner);
 
+    // Modifier to ensure ownership transfer is ready
     modifier onlyWhenTransferReady() {
-        require(block.timestamp >= ownershipTransferTime, "Transfer delay not passed");
+        require(_pendingOwner != address(0), "No pending transfer");
+        require(block.timestamp >= ownershipTransferTime, "Transfer delay not met");
         _;
     }
 
-/// @notice Initiates ownership transfer to new owner
-/// @dev Starts 2-day transfer timer
-function transferOwnership(address newOwner) public override onlyOwner {
-    require(newOwner != address(0), "Invalid address");
-    _pendingOwner = newOwner;
-    ownershipTransferTime = block.timestamp + OWNERSHIP_TRANSFER_DELAY;
-    emit OwnershipTransferStarted(newOwner);
-}
+    /// @notice Initiates ownership transfer to new owner
+    /// @dev Starts 2-day transfer timer
+    function transferOwnership(address newOwner) public override onlyOwner {
+        require(newOwner != address(0), "Invalid address");
+        _pendingOwner = newOwner;
+        ownershipTransferTime = block.timestamp + OWNERSHIP_TRANSFER_DELAY;
+        emit OwnershipTransferStarted(newOwner);
+    }
 
-/// @notice Completes ownership transfer after delay
-function acceptOwnership() external onlyWhenTransferReady {
-    require(msg.sender == _pendingOwner, "Caller not pending owner");
-    _transferOwnership(_pendingOwner);
-    _pendingOwner = address(0);
-    ownershipTransferTime = 0;
-}
+    /// @notice Completes ownership transfer after delay
+    function acceptOwnership() external onlyWhenTransferReady {
+        require(msg.sender == _pendingOwner, "Caller not pending owner");
+        _transferOwnership(_pendingOwner);
+        _pendingOwner = address(0);
+        ownershipTransferTime = 0;
+    }
 
-/// @notice Cancels pending ownership transfer
-function cancelOwnershipTransfer() external onlyOwner {
-    require(_pendingOwner != address(0), "No pending transfer");
-    emit OwnershipTransferCanceled(_pendingOwner);
-    _pendingOwner = address(0);
-    ownershipTransferTime = 0;
-}
+    /// @notice Cancels pending ownership transfer
+    function cancelOwnershipTransfer() external onlyOwner {
+        require(_pendingOwner != address(0), "No pending transfer");
+        emit OwnershipTransferCanceled(_pendingOwner);
+        _pendingOwner = address(0);
+        ownershipTransferTime = 0;
+    }
 
-//@audit Disable dangerous renouncement function
-function renounceOwnership() public view override onlyOwner {
-    revert("Ownership renunciation disabled");
+    //@audit Disable dangerous renouncement function
+    function renounceOwnership() public view override onlyOwner {
+        revert("Ownership renunciation disabled");
+    }
 }

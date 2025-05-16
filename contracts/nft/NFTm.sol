@@ -202,7 +202,7 @@ contract NFTm is ERC721, Ownable, ReentrancyGuard {
         return _approvedMinters[account];
     }
     
-    function getNFTiForToken(uint256 nftmTokenId) external view returns (uint256) {
+    function getNFTiForToken(uint256 nftmTokenId) public view returns (uint256) {
         // Find the NFTi token ID associated with this NFTm token
         for (uint256 i = 1; i <= _tokenIdCounter.current(); i++) {
             if (nftiToNftm[i] == nftmTokenId) {

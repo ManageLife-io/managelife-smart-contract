@@ -9,8 +9,9 @@ import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 /// @notice Manages system roles, fees, KYC verification, and reward parameters
 /// @dev Implements role-based access control and emergency pause functionality
 contract AdminControl is AccessControl, Pausable {
-    event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
-    event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
+    // 重新命名这些事件以避免与AccessControl合约中的事件冲突
+    event AdminRoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
+    event AdminRoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
     using EnumerableSet for EnumerableSet.AddressSet;
     
     // ========== Role Definitions ==========
@@ -50,12 +51,12 @@ contract AdminControl is AccessControl, Pausable {
     event KYCStatusUpdated(address indexed account, bool status);
     function grantRole(bytes32 role, address account) public override(AccessControl) onlyRole(getRoleAdmin(role)) {
         super.grantRole(role, account);
-        emit RoleGranted(role, account, msg.sender);
+        emit AdminRoleGranted(role, account, msg.sender);
     }
 
     function revokeRole(bytes32 role, address account) public override(AccessControl) onlyRole(getRoleAdmin(role)) {
         super.revokeRole(role, account);
-        emit RoleRevoked(role, account, msg.sender);
+        emit AdminRoleRevoked(role, account, msg.sender);
     }
 
     function _initializeRoles(address admin) internal {
@@ -213,12 +214,6 @@ contract AdminControl is AccessControl, Pausable {
     /// @param user Address of the user to calculate rewards for
     /// @param baseAmount Base amount to calculate rewards on
     /// @return Total reward amount including all bonuses
-    /// @notice Calculates total rewards for a user including all bonuses
-    /// @dev Includes base rate, lease bonus and community bonus
-    /// @param user Address of the user to calculate rewards for
-    /// @param baseAmount Base amount to calculate rewards on
-    /// @return Total reward amount including all bonuses
-    // Fixed duplicate NatSpec and added implementation clarity
     function calculateRewards(
         address user, 
         uint256 baseAmount

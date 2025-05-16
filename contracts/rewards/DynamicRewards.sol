@@ -4,7 +4,6 @@ pragma solidity 0.8.20;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "../../libraries/StakingConstants.sol";
 
 contract DynamicRewards is AccessControl, ReentrancyGuard {
@@ -14,7 +13,6 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         require(!_paused, "Contract is paused");
         _;
     }
-    using SafeMath for uint256;
     
     // ================== Constants ==================
     uint256 public constant TOKEN_UNIT = 1e18; // Precision unit for token calculations
@@ -70,8 +68,8 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         require(amount > 0, "Amount must be > 0");
         _updateRewards(msg.sender);
         
-        _totalSupply = _totalSupply.add(amount);
-        _balances[msg.sender] = _balances[msg.sender].add(amount);
+        _totalSupply = _totalSupply + amount;
+        _balances[msg.sender] = _balances[msg.sender] + amount;
         _stakeTimestamps[msg.sender] = block.timestamp;
         
         bool success = stakingToken.transferFrom(msg.sender, address(this), amount);
@@ -85,9 +83,9 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         require(_balances[msg.sender] >= amount, "Insufficient balance");
         
         _updateRewards(msg.sender);
-        _totalSupply = _totalSupply.sub(amount);
+        _totalSupply = _totalSupply - amount;
         _snapshotBalances[msg.sender] = _balances[msg.sender];
-        _balances[msg.sender] = _balances[msg.sender].sub(amount);
+        _balances[msg.sender] = _balances[msg.sender] - amount;
         
         bool success = stakingToken.transfer(msg.sender, amount);
         require(success, "Transfer failed");
@@ -111,7 +109,7 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         uint256 scheduleId = ++currentScheduleId;
         rewardSchedules[scheduleId] = RewardSchedule({
             startTime: startTime,
-            endTime: startTime.add(duration),
+            endTime: startTime + duration,
             totalRewards: totalReward,
             claimedRewards: 0,
             rewardsToken: rewardsToken
@@ -141,7 +139,7 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
 
     function earned(address account) public view returns (uint256 total) {
         for (uint256 i = 1; i <= currentScheduleId; i++) {
-            total = total.add(_earnedPerSchedule(account, i));
+            total = total + _earnedPerSchedule(account, i);
         }
     }
 
@@ -149,20 +147,20 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         RewardSchedule storage schedule = rewardSchedules[scheduleId];
         if (_snapshotBalances[account] == 0 || block.timestamp < schedule.startTime) return 0;
     
-        // 新增的边界检查
-        uint256 totalDuration = schedule.endTime.sub(schedule.startTime);
+        // Additional boundary check
+        uint256 totalDuration = schedule.endTime - schedule.startTime;
         require(totalDuration > 0, "Invalid schedule duration");
         
-        uint256 timeElapsed = block.timestamp.sub(schedule.startTime);
-        if (timeElapsed > totalDuration) { // 时间上限检查
+        uint256 timeElapsed = block.timestamp - schedule.startTime;
+        if (timeElapsed > totalDuration) { // Time upper limit check
             timeElapsed = totalDuration;
         }
     
-        uint256 multiplier = timeElapsed.mul(MULTIPLIER).div(totalDuration);
-        uint256 availableRewards = schedule.totalRewards.mul(timeElapsed).div(totalDuration);
-        uint256 userShare = _balances[account].mul(multiplier).div(_totalSupply);
+        uint256 multiplier = timeElapsed * MULTIPLIER / totalDuration;
+        uint256 availableRewards = schedule.totalRewards * timeElapsed / totalDuration;
+        uint256 userShare = _balances[account] * multiplier / _totalSupply;
         
-        return availableRewards.mul(userShare).div(TOKEN_UNIT).sub(_userAccrued[account][scheduleId]);
+        return availableRewards * userShare / TOKEN_UNIT - _userAccrued[account][scheduleId];
     }
 
     // ================== Reward Claiming ==================
@@ -178,10 +176,10 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
             // Security checks
             require(amount > 0, "Nothing to claim");
             _userAccrued[msg.sender][i] = 0;
-            schedule.claimedRewards = schedule.claimedRewards.add(amount);
+            schedule.claimedRewards = schedule.claimedRewards + amount;
             
             _sendReward(schedule.rewardsToken, msg.sender, amount);
-            totalClaimed = totalClaimed.add(amount);
+            totalClaimed = totalClaimed + amount;
         }
 
         require(totalClaimed > 0, "No rewards");
@@ -193,7 +191,7 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         for (uint256 i = 1; i <= currentScheduleId; i++) {
             // Only update rewards if the schedule is still active
             if (block.timestamp < rewardSchedules[i].endTime) {
-                _userAccrued[account][i] = _userAccrued[account][i].add(_earnedPerSchedule(account, i));
+                _userAccrued[account][i] = _userAccrued[account][i] + _earnedPerSchedule(account, i);
             }
         }
     }
@@ -241,5 +239,12 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
             }
         }
         return active;
+    }
+
+    function rewardPerToken() public view returns (uint256) {
+        if (_totalSupply == 0) {
+            return rewardPerTokenStored;
+        }
+        return rewardPerTokenStored + ((block.timestamp - lastUpdateTime) * MULTIPLIER * rewardPerTokenStored) / _totalSupply;
     }
 }

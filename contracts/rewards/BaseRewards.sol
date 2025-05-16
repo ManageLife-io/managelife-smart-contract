@@ -1,26 +1,24 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "../../libraries/StakingConstants.sol";
 
 /// @title BaseRewards - Basic staking and reward distribution contract
 /// @notice Implements a staking mechanism where users can stake tokens and earn rewards
 /// @dev Inherits from Ownable for access control and ReentrancyGuard for security
 contract BaseRewards is Ownable, ReentrancyGuard {
-    using SafeMath for uint256;
+    // SafeMath no longer needed in Solidity 0.8.x
     uint256 public constant MIN_STAKING_PERIOD = StakingConstants.MIN_STAKING_PERIOD;
     
     // Decimal handling
     uint256 public immutable stakingTokenUnit;
     uint256 public immutable rewardsTokenUnit;
-
-    IERC20 public immutable stakingToken;
-    IERC20 public immutable rewardsToken;
-
+    
+    ERC20 public immutable stakingToken;
+    ERC20 public immutable rewardsToken;
     
 
     // Reward rate parameters
@@ -32,6 +30,7 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     
     RewardPeriod[] public rewardPeriods;
     uint256 public rewardPerTokenStored;
+    uint256 public lastUpdateTime;
 
     // User configurations
     mapping(address => uint256) public userRewardPerTokenPaid;
@@ -67,24 +66,37 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         address _stakingToken,
         address _rewardsToken,
         address initialOwner
-    ) Ownable(initialOwner) {
+    ) Ownable() {
         require(_stakingToken != address(0), "Invalid staking token address");
         require(_rewardsToken != address(0), "Invalid rewards token address");
         
-        stakingToken = IERC20(_stakingToken);
-        rewardsToken = IERC20(_rewardsToken);
-
-        // Get token decimals with fallback
+        stakingToken = ERC20(_stakingToken);
+        rewardsToken = ERC20(_rewardsToken);
+    
+        // Initialize immutable variables directly in constructor without using try/catch
+        uint256 _stakingTokenUnit;
+        uint256 _rewardsTokenUnit;
+        
+        // Get token decimals using temporary variables
         try stakingToken.decimals() returns (uint8 decimals) {
-            stakingTokenUnit = 10 ** uint256(decimals);
+            _stakingTokenUnit = 10 ** uint256(decimals);
         } catch {
-            stakingTokenUnit = 1e18;
+            _stakingTokenUnit = 1e18;
         }
         
         try rewardsToken.decimals() returns (uint8 decimals) {
-            rewardsTokenUnit = 10 ** uint256(decimals);
+            _rewardsTokenUnit = 10 ** uint256(decimals);
         } catch {
-            rewardsTokenUnit = 1e18;
+            _rewardsTokenUnit = 1e18;
+        }
+        
+        // Initialize immutable variables using temporary values
+        stakingTokenUnit = _stakingTokenUnit;
+        rewardsTokenUnit = _rewardsTokenUnit;
+        
+        // Transfer ownership
+        if (initialOwner != address(0) && initialOwner != msg.sender) {
+            _transferOwnership(initialOwner);
         }
     }
 
@@ -104,12 +116,12 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         uint256 balanceAfter = stakingToken.balanceOf(address(this));
         
         // Verify the actual amount received
-        uint256 amountReceived = balanceAfter.sub(balanceBefore);
+        uint256 amountReceived = balanceAfter - balanceBefore;
         require(amountReceived == amount, "Incorrect amount received");
         
-        // Update state variables using SafeMath
-        _totalSupply = _totalSupply.add(amountReceived);
-        _balances[msg.sender] = _balances[msg.sender].add(amountReceived);
+        // Update state variables
+        _totalSupply = _totalSupply + amountReceived;
+        _balances[msg.sender] = _balances[msg.sender] + amountReceived;
         _stakeTimestamps[msg.sender] = block.timestamp;
         
         emit Staked(msg.sender, amountReceived);
@@ -125,9 +137,9 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         uint256 currentBalance = _balances[msg.sender];
         require(currentBalance >= amount, "Insufficient staked balance");
         
-        // SafeMath subtraction with explicit underflow protection
-        _balances[msg.sender] = currentBalance.sub(amount);
-        _totalSupply = _totalSupply.sub(amount);
+        // Native subtraction with automatic underflow protection in Solidity 0.8.20
+        _balances[msg.sender] = currentBalance - amount;
+        _totalSupply = _totalSupply - amount;
         
         // Maintain checks-effects-interactions pattern
         require(stakingToken.transfer(msg.sender, amount), "Token transfer failed");
@@ -158,24 +170,27 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     /// @notice Sets the reward rate for the staking contract
     /// @dev Only callable by contract owner
     /// @param _rewardRate New reward rate per second
-    function setRewardRate(uint256 newRate) external onlyOwner updateReward(address(0)) {
+    function setRewardRate(uint256 _rewardRate) external onlyOwner updateReward(address(0)) {
         require(!rateChangePaused, "Circuit breaker active: rate changes paused");
-        require(newRate <= MAX_REWARD_RATE, "Reward rate exceeds maximum");
+        require(_rewardRate <= MAX_REWARD_RATE, "Reward rate exceeds maximum");
         require(block.timestamp >= lastRateChange + RATE_CHANGE_COOLDOWN, "Rate change cooldown active");
+        
+        uint256 oldRate = rewardPeriods.length > 0 ? rewardPeriods[rewardPeriods.length - 1].rate : 0;
+        
         if (rewardPeriods.length > 0) {
             RewardPeriod storage lastPeriod = rewardPeriods[rewardPeriods.length - 1];
             lastPeriod.endTime = block.timestamp;
         }
-        rewardPeriods.push(RewardPeriod({
-            rate: newRate,
+        RewardPeriod memory newPeriod = RewardPeriod({
+            rate: _rewardRate,
             startTime: block.timestamp,
-            endTime: type(uint256).max
-        }));
-        uint256 oldRate = rewardPeriods.length > 0 ? rewardPeriods[rewardPeriods.length - 1].rate : 0;
+            endTime: 0
+        });
+        rewardPeriods.push(newPeriod);
         
         lastUpdateTime = block.timestamp;
         lastRateChange = block.timestamp;
-        emit RewardRateUpdated(oldRate, newRate, msg.sender);
+        emit RewardRateUpdated(oldRate, _rewardRate, msg.sender);
     }
 
     event CircuitBreakerToggled(bool paused);
@@ -216,9 +231,9 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     function earned(address account) public view returns (uint256) {
         return
             _snapshotBalances[account]
-                .mul(rewardPerToken().sub(userRewardPerTokenPaid[account]))
-                .div(stakingTokenUnit)
-                .add(rewards[account]);
+                * (rewardPerToken() - userRewardPerTokenPaid[account])
+                / stakingTokenUnit
+                 + rewards[account];
     }
 
     /// @notice Calculates the current reward per token stored
@@ -242,11 +257,11 @@ contract BaseRewards is Ownable, ReentrancyGuard {
                 uint256 periodEnd = periodEndTime < block.timestamp ? periodEndTime : block.timestamp;
                 
                 if (periodEnd > periodStart) {
-                    uint256 periodDuration = periodEnd.sub(periodStart);
+                    uint256 periodDuration = periodEnd - periodStart;
                     uint256 periodRate = period.rate;
                     
-                    totalAdditionalReward = totalAdditionalReward.add(
-                        periodRate.mul(periodDuration).mul(rewardsTokenUnit).div(_totalSupply)
+                    totalAdditionalReward = totalAdditionalReward + (
+                        periodRate * periodDuration * rewardsTokenUnit / _totalSupply
                     );
                     
                     if (++processedPeriods >= MAX_PERIODS_PROCESSED) {
@@ -255,7 +270,7 @@ contract BaseRewards is Ownable, ReentrancyGuard {
                 }
             }
         }
-        return rewardPerTokenStored.add(totalAdditionalReward);
+        return rewardPerTokenStored + totalAdditionalReward;
     }
 
     /******************** Modifiers ********************/
@@ -279,30 +294,3 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         _;
     }
 }
-
-    function _calculateRewards(address user) internal view returns (uint256) {
-        return userStakes[user]
-            .mul(rewardPerTokenStored.sub(userRewardPerTokenPaid[user]))
-            .div(stakingTokenUnit)
-            .add(rewards[user]);
-    }
-    
-    function _updateReward(address account) internal {
-        rewardPerTokenStored = rewardPerToken();
-        lastUpdateTime = lastTimeRewardApplicable();
-        if (account != address(0)) {
-            rewards[account] = earned(account);
-            userRewardPerTokenPaid[account] = rewardPerTokenStored;
-        }
-    }
-    
-    function rewardPerToken() public view returns (uint256) {
-        if (totalStaked == 0) return rewardPerTokenStored;
-        return rewardPerTokenStored.add(
-            lastTimeRewardApplicable()
-                .sub(lastUpdateTime)
-                .mul(rewardRate)
-                .mul(rewardsTokenUnit)
-                .div(totalStaked)
-        );
-    }

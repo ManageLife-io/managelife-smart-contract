@@ -25,7 +25,7 @@ contract NFTi is ERC721, Ownable, ReentrancyGuard {
 
     mapping(uint256 => Property) public properties;
 
-    constructor() ERC721("ManageLife NFTi", "NFTi") Ownable(msg.sender) {
+    constructor() ERC721("ManageLife NFTi", "NFTi") Ownable() {
         tokenCounter = 1;
     }
     

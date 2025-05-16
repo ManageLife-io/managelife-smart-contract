@@ -10,7 +10,14 @@ import "../governance/AdminControl.sol";
 /// @notice This contract enables listing, buying, selling and bidding on real estate NFTs
 /// @dev Implements a secure marketplace with support for both direct purchases and bidding
 /// @custom:security-contact security@example.com
-contract PropertyMarket is ReentrancyGuard {
+contract PropertyMarket is ReentrancyGuard, AdminControl {
+    constructor(address _nftiAddress, address _nftmAddress, address initialAdmin, address feeCollector, address rewardsVault) AdminControl(initialAdmin, feeCollector, rewardsVault) {
+        // Add ETH as default allowed payment method
+        allowedPaymentTokens[address(0)] = true;
+        nftiContract = IERC721(_nftiAddress);
+        nftmContract = IERC721(_nftmAddress);
+    }
+
     // ========== Constants ==========
     uint256 public constant PERCENTAGE_BASE = 10000; // Base for percentage calculations (100% = 10000)
     
@@ -37,7 +44,6 @@ contract PropertyMarket is ReentrancyGuard {
     }
 
     // ========== State Variables ==========
-    AdminControl public immutable adminControl;
     IERC721 public immutable nftiContract;
     IERC721 public immutable nftmContract;
     
@@ -102,18 +108,7 @@ contract PropertyMarket is ReentrancyGuard {
     event WhitelistStatusChanged(bool enabled, address indexed operator);
 
     // ========== Constructor ==========
-    constructor(
-        address _adminControl,
-        address _nftiAddress,
-        address _nftmAddress
-    ) {
-        adminControl = AdminControl(_adminControl);
-        nftiContract = IERC721(_nftiAddress);
-        nftmContract = IERC721(_nftmAddress);
-        
-        // Add ETH as default allowed payment method
-        allowedPaymentTokens[address(0)] = true;
-    }
+    // Constructor moved to the top of the contract
     
     // ========== Token Whitelist Management ==========
     
@@ -169,7 +164,7 @@ contract PropertyMarket is ReentrancyGuard {
         );
         
         require(
-            adminControl.isKYCVerified(msg.sender),
+            this.isKYCVerified(msg.sender),
             "KYC required"
         );
         
@@ -209,7 +204,7 @@ contract PropertyMarket is ReentrancyGuard {
         );
         
         require(
-            adminControl.isKYCVerified(msg.sender),
+            this.isKYCVerified(msg.sender),
             "KYC required"
         );
         
@@ -280,7 +275,8 @@ contract PropertyMarket is ReentrancyGuard {
         uint256 price,
         address paymentToken
     ) internal {
-        (uint256 baseFee,, address feeCollector) = adminControl.feeConfig();
+        uint256 baseFee = feeConfig.baseFee;
+        address feeCollector = feeConfig.feeCollector;
         uint256 fees = (price * baseFee) / PERCENTAGE_BASE;
         uint256 netValue = price - fees;
 
@@ -338,9 +334,9 @@ require(successFee, "Fee transfer failed");
 
     // ========== Access Modifiers ==========
     modifier onlyOperator() {
-        bytes32 role = adminControl.OPERATOR_ROLE();
+        bytes32 role = OPERATOR_ROLE;
         require(
-            adminControl.hasRole(role, msg.sender),
+            hasRole(role, msg.sender),
             "Operator required"
         );
         _;
@@ -378,26 +374,28 @@ require(successFee, "Fee transfer failed");
     
     // ========== Bidding Functions ==========
     
+    // ========== Bidding Constants ==========
+    /// @notice Minimum percentage increment required for new bids
+    uint256 public constant MIN_BID_INCREMENT_PERCENT = 5;
+    
     /**
-     * @dev 买家对NFT进行出价
-     * @param tokenId NFT的ID
-     * @param bidAmount 出价金额
-     * @param paymentToken 支付代币地址（0地址表示ETH）
+     * @dev Buyer places a bid on an NFT
+     * @param tokenId NFT identifier
+     * @param bidAmount Bid amount
+     * @param paymentToken Payment token address (address(0) for ETH)
      */
     /// @notice Places a bid on a listed property
     /// @dev Requires KYC verification and proper token approval
     /// @param tokenId The ID of the NFT to bid on
     /// @param bidAmount The amount to bid
     /// @param paymentToken The token address for payment (address(0) for ETH)
-    // Add new constant for minimum bid increment (5%)
-    uint256 public constant MIN_BID_INCREMENT_PERCENT = 5;
     
     function placeBid(uint256 tokenId, uint256 bidAmount, address paymentToken) external payable nonReentrant {
         PropertyListing storage listing = listings[tokenId];
         require(listing.status == PropertyStatus.LISTED, "Property not listed");
         require(listing.seller != msg.sender, "Cannot bid on your own listing");
         require(bidAmount > 0, "Bid amount must be greater than 0");
-        require(adminControl.isKYCVerified(msg.sender), "KYC required");
+        require(this.isKYCVerified(msg.sender), "KYC required");
         require(isTokenAllowed(paymentToken), "Payment token not allowed");
         
         // Check if bid exists and update if it does
@@ -457,14 +455,20 @@ require(successFee, "Fee transfer failed");
     }
     
     /**
-     * @dev 卖家接受特定买家的出价
-     * @param tokenId NFT的ID
-     * @param bidder 买家地址
+     * @dev Seller accepts a specific bid on an NFT
+     * @param tokenId NFT identifier
+     * @param bidIndex Index of the bid to accept
+     * @param expectedBidder Expected buyer address
+     * @param expectedAmount Expected bid amount
+     * @param expectedPaymentToken Expected payment token address
      */
     /// @notice Accepts a specific bid on a listed property
     /// @dev Transfers NFT to bidder and handles payment to seller
     /// @param tokenId The ID of the NFT
-    /// @param bidder The address of the bidder whose bid to accept
+    /// @param bidIndex The index of the bid to accept
+    /// @param expectedBidder The address of the bidder whose bid to accept
+    /// @param expectedAmount The expected bid amount
+    /// @param expectedPaymentToken The expected payment token address
     function acceptBid(uint256 tokenId, uint256 bidIndex, address expectedBidder, uint256 expectedAmount, address expectedPaymentToken) external nonReentrant {
         PropertyListing storage listing = listings[tokenId];
         require(listing.status == PropertyStatus.LISTED, "Property not listed");
@@ -487,7 +491,8 @@ require(successFee, "Fee transfer failed");
         acceptedBid.isActive = false;
         
         // Calculate payment details
-        (uint256 baseFee,, address feeCollector) = adminControl.feeConfig();
+        uint256 baseFee = feeConfig.baseFee;
+        address feeCollector = feeConfig.feeCollector;
         uint256 fees = (acceptedBid.amount * baseFee) / 10000;
         uint256 netValue = acceptedBid.amount - fees;
         
@@ -537,8 +542,8 @@ require(successFee, "Fee transfer failed");
     }
     
     /**
-     * @dev 买家取消自己的出价
-     * @param tokenId NFT的ID
+     * @dev Buyer cancels their bid
+     * @param tokenId NFT identifier
      */
     /// @notice Cancels an active bid placed by the caller
     /// @dev Only the original bidder can cancel their bid
@@ -558,18 +563,18 @@ require(successFee, "Fee transfer failed");
         if (bid.paymentToken == address(0)) {
             uint256 ethAmount = ethBidDeposits[tokenId][msg.sender];
             require(ethAmount >= bid.amount, "Insufficient ETH escrow");
-            (bool success, ) = payable(msg.sender).call{value: bid.amount, gas: 2300}("");
-require(success, "Bid refund failed");
             ethBidDeposits[tokenId][msg.sender] = 0;
+            (bool success, ) = payable(msg.sender).call{value: ethAmount}("");
+            require(success, "Bid refund failed");
         }
         
         emit BidCancelled(tokenId, msg.sender, bid.amount);
     }
     
     /**
-     * @dev 获取特定NFT的所有活跃出价
-     * @param tokenId NFT的ID
-     * @return 活跃出价数组
+     * @dev Get all active bids for a specific NFT
+     * @param tokenId NFT identifier
+     * @return Array of active bids
      */
     /// @notice Gets all active bids for a specific property
     /// @dev Returns an array of active bids, filtering out inactive ones
@@ -602,10 +607,10 @@ require(success, "Bid refund failed");
     }
     
     /**
-     * @dev 获取特定买家对特定NFT的出价
-     * @param tokenId NFT的ID
-     * @param bidder 买家地址
-     * @return 出价信息，如果不存在则返回默认值
+     * @dev Get bid from a specific buyer for a specific NFT
+     * @param tokenId NFT identifier
+     * @param bidder Buyer address
+     * @return Bid information, returns default value if it doesn't exist
      */
     /// @notice Gets the current bid from a specific bidder
     /// @dev Returns a default empty bid if no active bid exists
@@ -623,9 +628,9 @@ require(success, "Bid refund failed");
     }
     
     /**
-     * @dev 清除NFT的所有出价，除了指定的一个
-     * @param tokenId NFT的ID
-     * @param exceptIndex 不清除的出价索引
+     * @dev Clear all bids for an NFT except for the specified one
+     * @param tokenId NFT identifier
+     * @param exceptIndex Index of the bid to keep
      */
     function _clearAllBidsExcept(uint256 tokenId, uint256 exceptIndex) private {
         Bid[] storage bids = bidsForToken[tokenId];
@@ -637,26 +642,4 @@ require(success, "Bid refund failed");
             }
         }
     }
-}
-
-function acceptBid(
-    uint256 tokenId,
-    uint256 bidIndex,
-    address expectedBidder,
-    uint256 expectedAmount,
-    address expectedPaymentToken
-) external nonReentrant {
-    PropertyListing storage listing = listings[tokenId];
-    require(listing.status == PropertyStatus.LISTED, "Property not listed");
-    require(msg.sender == listing.seller, "Not seller");
-    
-    Bid storage acceptedBid = bidsForToken[tokenId][bidIndex - 1];
-    
-    // Validate bid parameters match expectations
-    require(acceptedBid.isActive, "Bid not active");
-    require(acceptedBid.bidder == expectedBidder, "Bidder mismatch");
-    require(acceptedBid.amount == expectedAmount, "Bid amount mismatch");
-    require(acceptedBid.paymentToken == expectedPaymentToken, "Payment token mismatch");
-
-    // ... rest of existing implementation ...
 }
