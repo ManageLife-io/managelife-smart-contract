@@ -6,22 +6,19 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "../governance/AdminControl.sol";
 
-/// @title PropertyMarket - A decentralized marketplace for real estate NFTs
-/// @notice This contract enables listing, buying, selling and bidding on real estate NFTs
-/// @dev Implements a secure marketplace with support for both direct purchases and bidding
-/// @custom:security-contact security@example.com
 contract PropertyMarket is ReentrancyGuard, AdminControl {
     constructor(address _nftiAddress, address _nftmAddress, address initialAdmin, address feeCollector, address rewardsVault) AdminControl(initialAdmin, feeCollector, rewardsVault) {
-        // Add ETH as default allowed payment method
+        require(_nftiAddress != address(0), "Invalid NFTi contract address");
+        require(_nftmAddress != address(0), "Invalid NFTm contract address");
+        
         allowedPaymentTokens[address(0)] = true;
         nftiContract = IERC721(_nftiAddress);
         nftmContract = IERC721(_nftmAddress);
     }
 
-    // ========== Constants ==========
-    uint256 public constant PERCENTAGE_BASE = 10000; // Base for percentage calculations (100% = 10000)
+    uint256 public constant MIN_BID_INCREMENT_PERCENT = 5;
+    uint256 public constant BID_PERCENTAGE_MULTIPLIER = 100;
     
-    // ========== Data Structures ==========
     enum PropertyStatus { LISTED, RENTED, SOLD, DELISTED }    
     
     struct Bid {
@@ -43,23 +40,18 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
         uint256 lastRenewed;
     }
 
-    // ========== State Variables ==========
     IERC721 public immutable nftiContract;
     IERC721 public immutable nftmContract;
     
-    // Token whitelist for payments
     mapping(address => bool) public allowedPaymentTokens;
-    bool public whitelistEnabled = true; // Enable/disable whitelist functionality
+    bool public whitelistEnabled = true;
     
     mapping(uint256 => PropertyListing) public listings;
     mapping(address => mapping(uint256 => uint256)) public leaseTerms;
     
-    // Bidding related mappings
-    mapping(uint256 => Bid[]) public bidsForToken; // tokenId => all bids
-    mapping(uint256 => mapping(address => uint256)) public ethBidDeposits; // tokenId => bidder => ETH amount
-    mapping(address => mapping(uint256 => uint256)) public bidIndexByBidder; // bidder => tokenId => bidIndex+1 (0 means no bid)
-
-    // ========== Event Definitions ==========
+    mapping(uint256 => Bid[]) public bidsForToken;
+    mapping(uint256 => mapping(address => uint256)) public ethBidDeposits;
+    mapping(address => mapping(uint256 => uint256)) public bidIndexByBidder;
     event NewListing(
         uint256 indexed tokenId,
         address indexed seller,
@@ -281,18 +273,31 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
         uint256 netValue = price - fees;
 
         if (paymentToken == address(0)) {
+            // Checks
             require(msg.value >= price, "Insufficient ETH");
             
-            if (msg.value > price) {
-                (bool success, ) = payable(msg.sender).call{value: msg.value - price, gas: 2300}("");
-require(success, "ETH refund failed");
+            // Calculate refund amount if any
+            uint256 refundAmount = msg.value > price ? msg.value - price : 0;
+            
+            // Effects - No state changes needed here as this is a payment processing function
+            // The calling function should handle state changes before calling this function
+            
+            // Interactions - External calls at the end
+            // First handle the refund if needed
+            if (refundAmount > 0) {
+                (bool refundSuccess, ) = payable(msg.sender).call{value: refundAmount}("");
+                require(refundSuccess, "ETH refund failed");
             }
             
-            (bool successSeller, ) = payable(seller).call{value: netValue, gas: 2300}("");
-require(successSeller, "Seller transfer failed");
-(bool successFee, ) = payable(feeCollector).call{value: fees, gas: 2300}("");
-require(successFee, "Fee transfer failed");
+            // Then transfer to seller
+            (bool successSeller, ) = payable(seller).call{value: netValue}("");
+            require(successSeller, "Seller transfer failed");
+            
+            // Finally transfer fees
+            (bool successFee, ) = payable(feeCollector).call{value: fees}("");
+            require(successFee, "Fee transfer failed");
         } else {
+            // Checks and Interactions for ERC20 tokens
             IERC20 token = IERC20(paymentToken);
             require(
                 token.transferFrom(msg.sender, seller, netValue),
@@ -376,7 +381,6 @@ require(successFee, "Fee transfer failed");
     
     // ========== Bidding Constants ==========
     /// @notice Minimum percentage increment required for new bids
-    uint256 public constant MIN_BID_INCREMENT_PERCENT = 5;
     
     /**
      * @dev Buyer places a bid on an NFT
@@ -405,7 +409,20 @@ require(successFee, "Fee transfer failed");
         // Validate payment method
         if (paymentToken == address(0)) {
             require(msg.value == bidAmount, "ETH amount mismatch");
-            ethBidDeposits[tokenId][msg.sender] += msg.value;
+            
+            // Handle ETH deposits properly for existing vs new bids
+            if (existingBidIndex > 0) {
+                // For existing bids, refund previous deposit and set new one
+                uint256 previousDeposit = ethBidDeposits[tokenId][msg.sender];
+                ethBidDeposits[tokenId][msg.sender] = msg.value;
+                if (previousDeposit > 0) {
+                    (bool success, ) = payable(msg.sender).call{value: previousDeposit}("");
+                    require(success, "ETH refund failed");
+                }
+            } else {
+                // For new bids, simply set the deposit
+                ethBidDeposits[tokenId][msg.sender] = msg.value;
+            }
         } else {
             IERC20 token = IERC20(paymentToken);
             uint256 allowance = token.allowance(msg.sender, address(this));
@@ -424,7 +441,7 @@ require(successFee, "Fee transfer failed");
         }
         
         if (highestBid > 0) {
-            uint256 minBid = highestBid * (100 + MIN_BID_INCREMENT_PERCENT) / 100;
+            uint256 minBid = highestBid * (BID_PERCENTAGE_MULTIPLIER + MIN_BID_INCREMENT_PERCENT) / BID_PERCENTAGE_MULTIPLIER;
             require(bidAmount >= minBid, "Bid must be 5% higher than current highest");
         }
         
@@ -432,7 +449,7 @@ require(successFee, "Fee transfer failed");
             Bid storage existingBid = bidsForToken[tokenId][existingBidIndex - 1];
             require(existingBid.isActive, "Bid is not active");
             require(existingBid.paymentToken == paymentToken, "Cannot change payment token");
-            uint256 minIncrement = existingBid.amount * (100 + MIN_BID_INCREMENT_PERCENT) / 100;
+            uint256 minIncrement = existingBid.amount * (BID_PERCENTAGE_MULTIPLIER + MIN_BID_INCREMENT_PERCENT) / BID_PERCENTAGE_MULTIPLIER;
             require(bidAmount >= minIncrement, "Bid must be 5% higher than previous");
             existingBid.amount = bidAmount;
             existingBid.bidTimestamp = block.timestamp;
@@ -493,7 +510,7 @@ require(successFee, "Fee transfer failed");
         // Calculate payment details
         uint256 baseFee = feeConfig.baseFee;
         address feeCollector = feeConfig.feeCollector;
-        uint256 fees = (acceptedBid.amount * baseFee) / 10000;
+        uint256 fees = (acceptedBid.amount * baseFee) / PERCENTAGE_BASE;
         uint256 netValue = acceptedBid.amount - fees;
         
         // Then process payment and external calls (Interactions)
@@ -506,9 +523,12 @@ require(successFee, "Fee transfer failed");
             // Update state before external calls
             ethBidDeposits[tokenId][acceptedBid.bidder] = 0;
             
-            // Make external calls
-            payable(msg.sender).transfer(netValue);
-            payable(feeCollector).transfer(fees);
+            // Make external calls using .call instead of .transfer for better gas handling
+            (bool successSeller, ) = payable(msg.sender).call{value: netValue}("");
+            require(successSeller, "Seller transfer failed");
+            
+            (bool successFee, ) = payable(feeCollector).call{value: fees}("");
+            require(successFee, "Fee transfer failed");
         } else {
             // ERC20 token payment
             IERC20 token = IERC20(acceptedBid.paymentToken);

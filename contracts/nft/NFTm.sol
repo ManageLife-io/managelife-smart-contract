@@ -8,7 +8,6 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
 import "@openzeppelin/contracts/utils/Counters.sol";
 
-// Updated interface to match AdminControl's role system
 interface IAdminControl {
     function hasRole(bytes32 role, address account) external view returns (bool);
     function isAdmin(address account) external view returns (bool);
@@ -28,12 +27,12 @@ contract NFTm is ERC721, Ownable, ReentrancyGuard {
 
     Counters.Counter private _tokenIdCounter;
     IAdminControl public adminController;
-    address public nftiContract; // Reference to the NFTi contract
+    address public nftiContract;
     
     mapping(uint256 => string) private _tokenURIs;
     mapping(uint256 => LegalInfo) public legalRecords;
     mapping(address => bool) private _approvedMinters;
-    mapping(uint256 => uint256) public nftiToNftm; // Mapping from NFTi ID to NFTm ID
+    mapping(uint256 => uint256) public nftiToNftm;
 
     event MetadataUpdated(uint256 indexed tokenId);
     event LegalRecordUpdated(uint256 indexed tokenId);
@@ -48,6 +47,9 @@ contract NFTm is ERC721, Ownable, ReentrancyGuard {
         address initialOwner,
         address _nftiContract
     ) ERC721("RealEstateNFT", "RNFT") {
+        require(adminControlAddress != address(0), "Invalid admin control address");
+        require(initialOwner != address(0), "Invalid initial owner address");
+        
         _transferOwnership(initialOwner);
         adminController = IAdminControl(adminControlAddress);
         if (_nftiContract != address(0)) {
@@ -56,8 +58,10 @@ contract NFTm is ERC721, Ownable, ReentrancyGuard {
         }
     }
 
-    // ======== Core Functions ========
-    // Added explicit role check in minting function
+    function renounceOwnership() public view override onlyOwner {
+        revert("Ownership renunciation disabled");
+    }
+
     function mintPropertyNFT(
         address to,
         string memory tokenURI_,
@@ -73,18 +77,18 @@ contract NFTm is ERC721, Ownable, ReentrancyGuard {
         );
         require(_validateLegalInfo(legalInfo), "Invalid legal data");
         
-        // First perform all checks
         bool nftiExists = false;
         if (nftiTokenId > 0 && nftiContract != address(0)) {
-            // Try-catch to handle potential revert if token doesn't exist
             try IERC721(nftiContract).ownerOf(nftiTokenId) returns (address) {
-                nftiExists = true; // NFTi token exists, proceed with linking
+                nftiExists = true;
             } catch {
                 revert("NFTi token does not exist");
             }
+            
+            if (nftiToNftm[nftiTokenId] != 0) {
+                revert("NFTi already linked to another NFTm");
+            }
         }
-
-        // Then make state changes (Effects)
         _tokenIdCounter.increment();
         uint256 newTokenId = _tokenIdCounter.current();
 
@@ -136,12 +140,14 @@ contract NFTm is ERC721, Ownable, ReentrancyGuard {
     }
 
     function addApprovedMinter(address minter) external onlyAdmin {
+        require(minter != address(0), "Invalid minter address");
         require(!_approvedMinters[minter], "Minter already approved");
         _approvedMinters[minter] = true;
         emit MinterAdded(minter, msg.sender);
     }
 
     function revokeMinter(address minter) external onlyAdmin {
+        require(minter != address(0), "Invalid minter address");
         require(_approvedMinters[minter], "Minter not approved");
         delete _approvedMinters[minter];
         emit MinterRemoved(minter, msg.sender);
@@ -149,6 +155,7 @@ contract NFTm is ERC721, Ownable, ReentrancyGuard {
 
     // ======== System Management ========
     function setAdminController(address newController) external onlyOwner {
+        require(newController != address(0), "Invalid admin controller address");
         adminController = IAdminControl(newController);
         emit ControllershipTransferred(newController);
     }
@@ -194,7 +201,7 @@ contract NFTm is ERC721, Ownable, ReentrancyGuard {
     }
 
     // ======== View Functions ========
-    function totalSupply() public view returns (uint256) {
+    function totalSupply() external view returns (uint256) {
         return _tokenIdCounter.current();
     }
 

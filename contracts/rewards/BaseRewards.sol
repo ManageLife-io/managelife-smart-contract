@@ -6,22 +6,15 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "../../libraries/StakingConstants.sol";
 
-/// @title BaseRewards - Basic staking and reward distribution contract
-/// @notice Implements a staking mechanism where users can stake tokens and earn rewards
-/// @dev Inherits from Ownable for access control and ReentrancyGuard for security
 contract BaseRewards is Ownable, ReentrancyGuard {
-    // SafeMath no longer needed in Solidity 0.8.x
     uint256 public constant MIN_STAKING_PERIOD = StakingConstants.MIN_STAKING_PERIOD;
     
-    // Decimal handling
     uint256 public immutable stakingTokenUnit;
     uint256 public immutable rewardsTokenUnit;
     
     ERC20 public immutable stakingToken;
     ERC20 public immutable rewardsToken;
     
-
-    // Reward rate parameters
     struct RewardPeriod {
         uint256 rate;
         uint256 startTime;
@@ -32,13 +25,16 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     uint256 public rewardPerTokenStored;
     uint256 public lastUpdateTime;
 
-    // User configurations
     mapping(address => uint256) public userRewardPerTokenPaid;
     mapping(address => uint256) public rewards;
     mapping(address => uint256) public rewardExpirationTimestamps;
-    uint256 public constant MAX_CLAIM_PERIOD = 30 days;
-    uint256 public constant MAX_REWARD_RATE = 1e20; // 100 tokens per second per staked token
-    uint256 public constant MAX_PERIODS_PROCESSED = 100; // Maximum periods processed per call
+    uint256 public constant MAX_CLAIM_PERIOD_DAYS = 30;
+    uint256 public constant SECONDS_PER_DAY = 86400;
+    uint256 public constant MAX_CLAIM_PERIOD = MAX_CLAIM_PERIOD_DAYS * SECONDS_PER_DAY;
+    uint256 public constant MAX_REWARD_RATE = 1e20;
+    uint256 public constant MAX_PERIODS_PROCESSED = 100;
+    uint256 public constant TOKEN_PRECISION = 1e18;
+    uint256 public constant PERCENTAGE_BASE = 10000;
     uint256 public constant RATE_CHANGE_COOLDOWN = 1 days;
     uint256 public lastRateChange;
     bool public rateChangePaused;
@@ -49,18 +45,26 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     mapping(address => uint256) private _stakeTimestamps;
     mapping(address => uint256) private _snapshotBalances;
     uint256 public minStakingPeriod = MIN_STAKING_PERIOD;
+    
+    struct StakeEntry {
+        uint256 amount;
+        uint256 timestamp;
+    }
+    mapping(address => StakeEntry[]) private _stakeEntries;
+    mapping(address => uint256) private _totalWithdrawable;
     event MinStakingPeriodUpdated(uint256 newPeriod);
 
     event Staked(address indexed user, uint256 amount);
     event Withdrawn(address indexed user, uint256 amount);
     event RewardPaid(address indexed user, uint256 reward);
     event RewardRateUpdated(uint256 oldRate, uint256 newRate, address indexed admin);
+    event TokensRescued(address indexed token, uint256 amount, address indexed recipient);
+    event CircuitBreakerToggled(bool paused, address indexed admin);
     
     function setMinStakingPeriod(uint256 period) external onlyOwner {
         minStakingPeriod = period;
         emit MinStakingPeriodUpdated(period);
     }
-    event TokensRescued(address indexed token, uint256 amount, address indexed admin);
 
     constructor(
         address _stakingToken,
@@ -100,6 +104,11 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         }
     }
 
+    // Security: Disable dangerous renouncement function
+    function renounceOwnership() public view override onlyOwner {
+        revert("Ownership renunciation disabled");
+    }
+
     /******************** Core Functions ********************/
     /// @notice Allows users to stake tokens
     /// @dev Updates rewards before processing stake
@@ -122,33 +131,84 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         // Update state variables
         _totalSupply = _totalSupply + amountReceived;
         _balances[msg.sender] = _balances[msg.sender] + amountReceived;
+        
+        // Update stake timestamp for each new stake to prevent gaming
+        // This ensures users must wait the minimum period for each stake amount
         _stakeTimestamps[msg.sender] = block.timestamp;
+        
+        // Record individual stake entry for precise tracking
+        _stakeEntries[msg.sender].push(StakeEntry({
+            amount: amountReceived,
+            timestamp: block.timestamp
+        }));
         
         emit Staked(msg.sender, amountReceived);
     }
 
-    /// @notice Allows users to withdraw their staked tokens
-    /// @dev Updates rewards before processing withdrawal
+    /// @notice Allows users to withdraw their staked tokens using FIFO logic
+    /// @dev Updates rewards before processing withdrawal, enforces minimum staking period per stake
     /// @param amount Amount of tokens to withdraw
-    function withdraw(uint256 amount) public nonReentrant updateReward(msg.sender) {
-        require(block.timestamp >= _stakeTimestamps[msg.sender] + minStakingPeriod, "Minimum staking period not met");
+    function withdraw(uint256 amount) external nonReentrant updateReward(msg.sender) {
         require(amount > 0, "Cannot withdraw 0");
-        // Explicit balance check using SafeMath
-        uint256 currentBalance = _balances[msg.sender];
-        require(currentBalance >= amount, "Insufficient staked balance");
         
-        // Native subtraction with automatic underflow protection in Solidity 0.8.20
-        _balances[msg.sender] = currentBalance - amount;
-        _totalSupply = _totalSupply - amount;
+        uint256 withdrawableAmount = getWithdrawableAmount(msg.sender);
+        require(withdrawableAmount >= amount, "Insufficient withdrawable balance");
         
-        // Maintain checks-effects-interactions pattern
+        // Process withdrawal using FIFO logic
+        uint256 remainingToWithdraw = amount;
+        StakeEntry[] storage userStakes = _stakeEntries[msg.sender];
+        
+        for (uint256 i = 0; i < userStakes.length && remainingToWithdraw > 0; i++) {
+            StakeEntry storage entry = userStakes[i];
+            
+            // Skip if this stake hasn't met minimum period
+            if (block.timestamp < entry.timestamp + minStakingPeriod) {
+                continue;
+            }
+            
+            // Skip if this entry is already fully withdrawn
+            if (entry.amount == 0) {
+                continue;
+            }
+            
+            uint256 withdrawFromEntry = remainingToWithdraw > entry.amount ? entry.amount : remainingToWithdraw;
+            entry.amount -= withdrawFromEntry;
+            remainingToWithdraw -= withdrawFromEntry;
+        }
+        
+        require(remainingToWithdraw == 0, "Withdrawal calculation error");
+        
+        // Update balances
+        _balances[msg.sender] -= amount;
+        _totalSupply -= amount;
+        
+        // Transfer tokens
         require(stakingToken.transfer(msg.sender, amount), "Token transfer failed");
         emit Withdrawn(msg.sender, amount);
+    }
+    
+    /// @notice Calculates the amount a user can withdraw (stakes that have met minimum period)
+    /// @param account User address to check
+    /// @return Total withdrawable amount
+    function getWithdrawableAmount(address account) public view returns (uint256) {
+        uint256 withdrawable = 0;
+        StakeEntry[] storage userStakes = _stakeEntries[account];
+        
+        for (uint256 i = 0; i < userStakes.length; i++) {
+            StakeEntry storage entry = userStakes[i];
+            
+            // Only count stakes that have met the minimum period
+            if (block.timestamp >= entry.timestamp + minStakingPeriod) {
+                withdrawable += entry.amount;
+            }
+        }
+        
+        return withdrawable;
     }
 
     /// @notice Allows users to claim their accumulated rewards
     /// @dev Updates rewards before processing claim
-    function claimReward() public nonReentrant updateReward(msg.sender) {
+    function claimReward() external nonReentrant updateReward(msg.sender) {
         require(block.timestamp <= rewardExpirationTimestamps[msg.sender], "Reward claim period expired");
         uint256 reward = rewards[msg.sender];
         if (reward > 0) {
@@ -160,9 +220,14 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     }
 
     function clearExpiredRewards(address account) external nonReentrant {
-        require(block.timestamp > rewardExpirationTimestamps[account], "Reward not expired");
+        require(account != address(0), "Invalid account address");
+        require(rewardExpirationTimestamps[account] > 0, "No rewards to clear");
+        require(block.timestamp > rewardExpirationTimestamps[account], "Rewards not expired");
+        
         uint256 expiredAmount = rewards[account];
         rewards[account] = 0;
+        rewardExpirationTimestamps[account] = 0;
+        
         emit RewardExpired(account, expiredAmount);
     }
 
@@ -184,7 +249,7 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         RewardPeriod memory newPeriod = RewardPeriod({
             rate: _rewardRate,
             startTime: block.timestamp,
-            endTime: 0
+            endTime: type(uint256).max  // Set to max value to indicate indefinite period
         });
         rewardPeriods.push(newPeriod);
         
@@ -193,22 +258,86 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         emit RewardRateUpdated(oldRate, _rewardRate, msg.sender);
     }
 
-    event CircuitBreakerToggled(bool paused);
-
     function toggleRateChangePaused(bool paused) external onlyOwner {
         rateChangePaused = paused;
-        emit CircuitBreakerToggled(paused);
+        emit CircuitBreakerToggled(paused, msg.sender);
+    }
+    
+    // Emergency state variables
+    bool public emergencyMode = false;
+    event EmergencyModeActivated(address indexed activator, uint256 timestamp);
+    event EmergencyWithdrawal(address indexed user, uint256 amount);
+    
+    /// @notice Activates emergency mode allowing users to withdraw their staked tokens regardless of staking period
+    /// @dev Can only be called by the contract owner in case of emergency
+    function activateEmergencyMode() external onlyOwner {
+        require(!emergencyMode, "Emergency mode already active");
+        emergencyMode = true;
+        emit EmergencyModeActivated(msg.sender, block.timestamp);
+    }
+    
+    /// @notice Allows users to withdraw their staked tokens in emergency mode
+    /// @dev Bypasses minimum staking period check but still updates rewards
+    function emergencyWithdraw() external nonReentrant updateReward(msg.sender) {
+        require(emergencyMode, "Emergency mode not active");
+        
+        uint256 amount = _balances[msg.sender];
+        require(amount > 0, "No staked tokens to withdraw");
+        
+        // Update state before transfer
+        _balances[msg.sender] = 0;
+        _totalSupply = _totalSupply - amount;
+        
+        // Transfer tokens to user
+        require(stakingToken.transfer(msg.sender, amount), "Emergency token transfer failed");
+        
+        emit EmergencyWithdrawal(msg.sender, amount);
     }
 
     /// @notice Allows owner to rescue any ERC20 tokens sent to the contract
-    /// @dev Only callable by contract owner
+    /// @dev Only callable by contract owner, with strict restrictions on staking and reward tokens
     /// @param tokenAddress Address of the token to rescue
     /// @param amount Amount of tokens to rescue
     function rescueERC20(address tokenAddress, uint256 amount) external onlyOwner {
+        require(tokenAddress != address(0), "Invalid token address");
+        require(amount > 0, "Cannot rescue zero amount");
+        
+        // Completely prohibit withdrawal of staking tokens
         require(tokenAddress != address(stakingToken), "Cannot withdraw staking token");
-        require(tokenAddress != address(rewardsToken), "Cannot withdraw rewards token");
+        
+        // For reward tokens, only allow rescue of excess tokens beyond what's needed for rewards
+        if (tokenAddress == address(rewardsToken)) {
+            uint256 contractBalance = rewardsToken.balanceOf(address(this));
+            uint256 totalPendingRewards = calculateTotalPendingRewards();
+            uint256 availableForRescue = contractBalance > totalPendingRewards ? contractBalance - totalPendingRewards : 0;
+            
+            require(availableForRescue > 0, "No excess reward tokens available for rescue");
+            require(amount <= availableForRescue, "Amount exceeds available excess reward tokens");
+        }
+        
         require(IERC20(tokenAddress).transfer(owner(), amount), "Token rescue transfer failed");
         emit TokensRescued(tokenAddress, amount, owner());
+    }
+    
+    /// @notice Calculates total pending rewards for all users
+    /// @dev Internal function to determine how many reward tokens are committed to users
+    /// @return Total amount of pending rewards
+    function calculateTotalPendingRewards() internal view returns (uint256) {
+        // This is a simplified calculation - in a production environment,
+        // you might need to iterate through all users or maintain a running total
+        // For now, we'll use a conservative approach and assume all rewards are pending
+        uint256 totalRewards = 0;
+        
+        // Calculate rewards based on current state
+        // This is a conservative estimate to prevent unauthorized withdrawals
+        if (_totalSupply > 0 && rewardPeriods.length > 0) {
+            // Estimate total rewards that could be claimed
+            // This is intentionally conservative to protect user funds
+            uint256 currentRewardPerToken = rewardPerToken();
+            totalRewards = (_totalSupply * currentRewardPerToken) / stakingTokenUnit;
+        }
+        
+        return totalRewards;
     }
 
     /******************** View Functions ********************/
@@ -254,7 +383,8 @@ contract BaseRewards is Ownable, ReentrancyGuard {
             
             if (periodEndTime > lastUpdateTime) {
                 uint256 periodStart = periodStartTime > lastUpdateTime ? periodStartTime : lastUpdateTime;
-                uint256 periodEnd = periodEndTime < block.timestamp ? periodEndTime : block.timestamp;
+                // Handle indefinite periods (endTime = type(uint256).max)
+                uint256 periodEnd = (periodEndTime == type(uint256).max || periodEndTime > block.timestamp) ? block.timestamp : periodEndTime;
                 
                 if (periodEnd > periodStart) {
                     uint256 periodDuration = periodEnd - periodStart;
@@ -284,13 +414,16 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         
         // Update account-specific reward data if account is valid
         if (account != address(0)) {
-            // Calculate and store earned rewards
+            // Calculate and store earned rewards using current snapshot balance
             rewards[account] = earned(account);
             // Update user's paid reward per token to current value
             userRewardPerTokenPaid[account] = currentRewardPerToken;
-            _snapshotBalances[account] = _balances[account];
             rewardExpirationTimestamps[account] = block.timestamp + MAX_CLAIM_PERIOD;
         }
         _;
+        // Update snapshot balance AFTER the function execution to capture new balance
+        if (account != address(0)) {
+            _snapshotBalances[account] = _balances[account];
+        }
     }
 }

@@ -37,11 +37,9 @@ contract NFTi is ERC721, Ownable, ReentrancyGuard {
     function mint(address to, string memory legalId, bool managed) external nonReentrant returns (uint256) {
         require(INFTm(nftmContract).hasRole(keccak256("OPERATOR_ROLE"), msg.sender), "NFTi: caller lacks operator role");
         
-        // First perform state changes (Effects)
         uint256 newTokenId = tokenCounter++;
         properties[newTokenId] = Property(legalId, managed, block.timestamp);
         
-        // Then make external calls (Interactions)
         _safeMint(to, newTokenId);
         
         return newTokenId;
@@ -50,16 +48,12 @@ contract NFTi is ERC721, Ownable, ReentrancyGuard {
     function burn(uint256 tokenId) external nonReentrant {
         require(ownerOf(tokenId) == msg.sender, "Not owner");
         
-        // First perform state changes
         _burn(tokenId);
         delete properties[tokenId];
         
-        // Then make external calls (following Checks-Effects-Interactions pattern)
         if (nftmContract != address(0)) {
             try INFTm(nftmContract).handleNFTiBurn(tokenId) {
-                // Successfully notified NFTm
             } catch {
-                // Continue even if notification fails
             }
         }
     }

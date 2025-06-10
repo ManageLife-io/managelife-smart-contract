@@ -1,7 +1,7 @@
 {
   "_format": "hh-sol-cache-2",
   "files": {
-    "D:\\CODE\\ml\\ML-20250516-1\\contracts\\1_Storage.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\contracts\\1_Storage.sol": {
       "lastModificationDate": 1747384316581,
       "contentHash": "bb0857f4de09b58274ae19fb41beab54",
       "sourceName": "contracts/1_Storage.sol",
@@ -37,7 +37,7 @@
         "Storage"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\contracts\\2_Owner.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\contracts\\2_Owner.sol": {
       "lastModificationDate": 1747384316581,
       "contentHash": "3f953297ea3b0dfa4554320bdfced50e",
       "sourceName": "contracts/2_Owner.sol",
@@ -75,7 +75,7 @@
         "Owner"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\hardhat\\console.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\hardhat\\console.sol": {
       "lastModificationDate": 1747384320454,
       "contentHash": "681c532e816169606d13a5fe8b475074",
       "sourceName": "hardhat/console.sol",
@@ -111,7 +111,7 @@
         "console"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\contracts\\3_Ballot.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\contracts\\3_Ballot.sol": {
       "lastModificationDate": 1747384316581,
       "contentHash": "8f51dce1cb5da231e34e09d1aa429a8c",
       "sourceName": "contracts/3_Ballot.sol",
@@ -147,9 +147,9 @@
         "Ballot"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\contracts\\governance\\AdminControl.sol": {
-      "lastModificationDate": 1747403428047,
-      "contentHash": "1a4258971226afb24572520ba132ed02",
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\contracts\\governance\\AdminControl.sol": {
+      "lastModificationDate": 1749566448959,
+      "contentHash": "401e10427bdb1270b215c84b7def56c8",
       "sourceName": "contracts/governance/AdminControl.sol",
       "solcConfig": {
         "version": "0.8.20",
@@ -177,8 +177,8 @@
       },
       "imports": [
         "@openzeppelin/contracts/access/AccessControl.sol",
-        "@openzeppelin/contracts/security/Pausable.sol",
-        "@openzeppelin/contracts/utils/structs/EnumerableSet.sol"
+        "@openzeppelin/contracts/security/ReentrancyGuard.sol",
+        "@openzeppelin/contracts/security/Pausable.sol"
       ],
       "versionPragmas": [
         "0.8.20"
@@ -187,7 +187,7 @@
         "AdminControl"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\access\\AccessControl.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\access\\AccessControl.sol": {
       "lastModificationDate": 1747384318488,
       "contentHash": "a2b1ec38a8dad325a596f926890772b8",
       "sourceName": "@openzeppelin/contracts/access/AccessControl.sol",
@@ -228,7 +228,7 @@
         "AccessControl"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\security\\Pausable.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\security\\Pausable.sol": {
       "lastModificationDate": 1747384318684,
       "contentHash": "25c8108f36fdd472bc78d4c4af240c11",
       "sourceName": "@openzeppelin/contracts/security/Pausable.sol",
@@ -266,7 +266,7 @@
         "Pausable"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\utils\\structs\\EnumerableSet.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\utils\\structs\\EnumerableSet.sol": {
       "lastModificationDate": 1747384318765,
       "contentHash": "e029f029abc1fd2d85d54fd69086f076",
       "sourceName": "@openzeppelin/contracts/utils/structs/EnumerableSet.sol",
@@ -302,43 +302,7 @@
         "EnumerableSet"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\utils\\Context.sol": {
-      "lastModificationDate": 1747384318739,
-      "contentHash": "f07feb4a44b1a4872370da5aa70e8e46",
-      "sourceName": "@openzeppelin/contracts/utils/Context.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "evmVersion": "paris",
-          "optimizer": {
-            "enabled": false,
-            "runs": 200
-          },
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [],
-      "versionPragmas": [
-        "^0.8.0"
-      ],
-      "artifacts": [
-        "Context"
-      ]
-    },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\utils\\Strings.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\utils\\Strings.sol": {
       "lastModificationDate": 1747384318743,
       "contentHash": "48686fc32a22a3754b8e63321857dd2a",
       "sourceName": "@openzeppelin/contracts/utils/Strings.sol",
@@ -377,7 +341,7 @@
         "Strings"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\utils\\introspection\\ERC165.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\utils\\introspection\\ERC165.sol": {
       "lastModificationDate": 1747384318751,
       "contentHash": "0e7db055ce108f9da7bb6686a00287c0",
       "sourceName": "@openzeppelin/contracts/utils/introspection/ERC165.sol",
@@ -415,7 +379,43 @@
         "ERC165"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\access\\IAccessControl.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\utils\\Context.sol": {
+      "lastModificationDate": 1747384318739,
+      "contentHash": "f07feb4a44b1a4872370da5aa70e8e46",
+      "sourceName": "@openzeppelin/contracts/utils/Context.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "evmVersion": "paris",
+          "optimizer": {
+            "enabled": false,
+            "runs": 200
+          },
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [],
+      "versionPragmas": [
+        "^0.8.0"
+      ],
+      "artifacts": [
+        "Context"
+      ]
+    },
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\access\\IAccessControl.sol": {
       "lastModificationDate": 1747384318492,
       "contentHash": "57c84298234411cea19c7c284d86be8b",
       "sourceName": "@openzeppelin/contracts/access/IAccessControl.sol",
@@ -451,7 +451,7 @@
         "IAccessControl"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\utils\\math\\Math.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\utils\\math\\Math.sol": {
       "lastModificationDate": 1747384318758,
       "contentHash": "fe63409d8a06818b926cf89e0ea88b1b",
       "sourceName": "@openzeppelin/contracts/utils/math/Math.sol",
@@ -487,7 +487,7 @@
         "Math"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\utils\\math\\SignedMath.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\utils\\math\\SignedMath.sol": {
       "lastModificationDate": 1747384318760,
       "contentHash": "9488ebd4daacfee8ad04811600d7d061",
       "sourceName": "@openzeppelin/contracts/utils/math/SignedMath.sol",
@@ -523,7 +523,7 @@
         "SignedMath"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\utils\\introspection\\IERC165.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\utils\\introspection\\IERC165.sol": {
       "lastModificationDate": 1747384318754,
       "contentHash": "03e6768535ac4da0e9756f1d8a4a018a",
       "sourceName": "@openzeppelin/contracts/utils/introspection/IERC165.sol",
@@ -559,9 +559,9 @@
         "IERC165"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\contracts\\nft\\NFTi.sol": {
-      "lastModificationDate": 1747397532728,
-      "contentHash": "756c0bf8e02a2a1a307da3cc890e4651",
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\contracts\\nft\\NFTi.sol": {
+      "lastModificationDate": 1749566010194,
+      "contentHash": "7413e18c339b9d1f686a3dbd504dd33c",
       "sourceName": "contracts/nft/NFTi.sol",
       "solcConfig": {
         "version": "0.8.20",
@@ -601,7 +601,43 @@
         "NFTi"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\access\\Ownable.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\security\\ReentrancyGuard.sol": {
+      "lastModificationDate": 1747384318685,
+      "contentHash": "1535f8c0c68463f8c1b5239f7584e71f",
+      "sourceName": "@openzeppelin/contracts/security/ReentrancyGuard.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "evmVersion": "paris",
+          "optimizer": {
+            "enabled": false,
+            "runs": 200
+          },
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [],
+      "versionPragmas": [
+        "^0.8.0"
+      ],
+      "artifacts": [
+        "ReentrancyGuard"
+      ]
+    },
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\access\\Ownable.sol": {
       "lastModificationDate": 1747384318494,
       "contentHash": "5a20b2cad87ddb61c7a3a6af21289e28",
       "sourceName": "@openzeppelin/contracts/access/Ownable.sol",
@@ -639,43 +675,7 @@
         "Ownable"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\security\\ReentrancyGuard.sol": {
-      "lastModificationDate": 1747384318685,
-      "contentHash": "1535f8c0c68463f8c1b5239f7584e71f",
-      "sourceName": "@openzeppelin/contracts/security/ReentrancyGuard.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "evmVersion": "paris",
-          "optimizer": {
-            "enabled": false,
-            "runs": 200
-          },
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [],
-      "versionPragmas": [
-        "^0.8.0"
-      ],
-      "artifacts": [
-        "ReentrancyGuard"
-      ]
-    },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\token\\ERC721\\ERC721.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\token\\ERC721\\ERC721.sol": {
       "lastModificationDate": 1747384318716,
       "contentHash": "95602b04f0b53f1139f4668d123ddeb7",
       "sourceName": "@openzeppelin/contracts/token/ERC721/ERC721.sol",
@@ -719,7 +719,7 @@
         "ERC721"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\token\\ERC721\\IERC721.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\token\\ERC721\\IERC721.sol": {
       "lastModificationDate": 1747384318716,
       "contentHash": "48de4c9a3a4ae5ef66a2aa620843413f",
       "sourceName": "@openzeppelin/contracts/token/ERC721/IERC721.sol",
@@ -757,7 +757,7 @@
         "IERC721"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\utils\\Address.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\utils\\Address.sol": {
       "lastModificationDate": 1747384318737,
       "contentHash": "211ffd288c1588ba8c10eae668ca3c66",
       "sourceName": "@openzeppelin/contracts/utils/Address.sol",
@@ -793,7 +793,7 @@
         "Address"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\token\\ERC721\\IERC721Receiver.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\token\\ERC721\\IERC721Receiver.sol": {
       "lastModificationDate": 1747384318717,
       "contentHash": "c22d4395e33763de693fd440c6fd10e1",
       "sourceName": "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol",
@@ -829,7 +829,7 @@
         "IERC721Receiver"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\token\\ERC721\\extensions\\IERC721Metadata.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\token\\ERC721\\extensions\\IERC721Metadata.sol": {
       "lastModificationDate": 1747384318726,
       "contentHash": "efbc0d15b80a74e34dbe8da0f3e879bb",
       "sourceName": "@openzeppelin/contracts/token/ERC721/extensions/IERC721Metadata.sol",
@@ -867,9 +867,316 @@
         "IERC721Metadata"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\contracts\\nft\\NFTm.sol": {
-      "lastModificationDate": 1747394511465,
-      "contentHash": "84ee74418cf960741e5c7fd4df052119",
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\token\\ERC20\\ERC20.sol": {
+      "lastModificationDate": 1747384318697,
+      "contentHash": "3ae5166c6827a9cf1a7a462d1632b464",
+      "sourceName": "@openzeppelin/contracts/token/ERC20/ERC20.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "evmVersion": "paris",
+          "optimizer": {
+            "enabled": false,
+            "runs": 200
+          },
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [
+        "./IERC20.sol",
+        "./extensions/IERC20Metadata.sol",
+        "../../utils/Context.sol"
+      ],
+      "versionPragmas": [
+        "^0.8.0"
+      ],
+      "artifacts": [
+        "ERC20"
+      ]
+    },
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\token\\ERC20\\IERC20.sol": {
+      "lastModificationDate": 1747384318698,
+      "contentHash": "df36f7051335cd1e748b1b6463b7fdd3",
+      "sourceName": "@openzeppelin/contracts/token/ERC20/IERC20.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "evmVersion": "paris",
+          "optimizer": {
+            "enabled": false,
+            "runs": 200
+          },
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [],
+      "versionPragmas": [
+        "^0.8.0"
+      ],
+      "artifacts": [
+        "IERC20"
+      ]
+    },
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\token\\ERC20\\extensions\\IERC20Metadata.sol": {
+      "lastModificationDate": 1747384318707,
+      "contentHash": "909ab67fc5c25033fe6cd364f8c056f9",
+      "sourceName": "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "evmVersion": "paris",
+          "optimizer": {
+            "enabled": false,
+            "runs": 200
+          },
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [
+        "../IERC20.sol"
+      ],
+      "versionPragmas": [
+        "^0.8.0"
+      ],
+      "artifacts": [
+        "IERC20Metadata"
+      ]
+    },
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\contracts\\rewards\\DynamicRewards.sol": {
+      "lastModificationDate": 1749565708411,
+      "contentHash": "3c9d0c0cc2553a845fe0d14247c58018",
+      "sourceName": "contracts/rewards/DynamicRewards.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "evmVersion": "paris",
+          "optimizer": {
+            "enabled": false,
+            "runs": 200
+          },
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [
+        "@openzeppelin/contracts/token/ERC20/IERC20.sol",
+        "@openzeppelin/contracts/access/AccessControl.sol",
+        "@openzeppelin/contracts/security/ReentrancyGuard.sol",
+        "../../libraries/StakingConstants.sol"
+      ],
+      "versionPragmas": [
+        "0.8.20"
+      ],
+      "artifacts": [
+        "DynamicRewards"
+      ]
+    },
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\libraries\\StakingConstants.sol": {
+      "lastModificationDate": 1747384316667,
+      "contentHash": "6586860ce318bb2308dd921747e02be5",
+      "sourceName": "libraries/StakingConstants.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "evmVersion": "paris",
+          "optimizer": {
+            "enabled": false,
+            "runs": 200
+          },
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [],
+      "versionPragmas": [
+        "0.8.20"
+      ],
+      "artifacts": [
+        "StakingConstants"
+      ]
+    },
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\contracts\\rewards\\BaseRewards.sol": {
+      "lastModificationDate": 1749565959241,
+      "contentHash": "014452360d8c85960bd63231f94f85c0",
+      "sourceName": "contracts/rewards/BaseRewards.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "evmVersion": "paris",
+          "optimizer": {
+            "enabled": false,
+            "runs": 200
+          },
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [
+        "@openzeppelin/contracts/token/ERC20/ERC20.sol",
+        "@openzeppelin/contracts/access/Ownable.sol",
+        "@openzeppelin/contracts/security/ReentrancyGuard.sol",
+        "../../libraries/StakingConstants.sol"
+      ],
+      "versionPragmas": [
+        "0.8.20"
+      ],
+      "artifacts": [
+        "BaseRewards"
+      ]
+    },
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\contracts\\tokens\\LifeToken.sol": {
+      "lastModificationDate": 1749565931884,
+      "contentHash": "de1b75102fe6f4887207c45484af65eb",
+      "sourceName": "contracts/tokens/LifeToken.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "evmVersion": "paris",
+          "optimizer": {
+            "enabled": false,
+            "runs": 200
+          },
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [
+        "@openzeppelin/contracts/token/ERC20/ERC20.sol",
+        "@openzeppelin/contracts/access/Ownable.sol"
+      ],
+      "versionPragmas": [
+        "0.8.20"
+      ],
+      "artifacts": [
+        "LifeToken"
+      ]
+    },
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\utils\\math\\SafeMath.sol": {
+      "lastModificationDate": 1747384318760,
+      "contentHash": "f6f4fda16c536e57069af40a245c985e",
+      "sourceName": "@openzeppelin/contracts/utils/math/SafeMath.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "evmVersion": "paris",
+          "optimizer": {
+            "enabled": false,
+            "runs": 200
+          },
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [],
+      "versionPragmas": [
+        "^0.8.0"
+      ],
+      "artifacts": [
+        "SafeMath"
+      ]
+    },
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\contracts\\nft\\NFTm.sol": {
+      "lastModificationDate": 1749566050774,
+      "contentHash": "6be1b8b483863deb7c2ed80cec0a556e",
       "sourceName": "contracts/nft/NFTm.sol",
       "solcConfig": {
         "version": "0.8.20",
@@ -911,7 +1218,7 @@
         "NFTm"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\utils\\Counters.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\node_modules\\@openzeppelin\\contracts\\utils\\Counters.sol": {
       "lastModificationDate": 1747384318739,
       "contentHash": "74654e3ae5d7f39555055dfe244dab7a",
       "sourceName": "@openzeppelin/contracts/utils/Counters.sol",
@@ -947,241 +1254,9 @@
         "Counters"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\token\\ERC20\\ERC20.sol": {
-      "lastModificationDate": 1747384318697,
-      "contentHash": "3ae5166c6827a9cf1a7a462d1632b464",
-      "sourceName": "@openzeppelin/contracts/token/ERC20/ERC20.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "evmVersion": "paris",
-          "optimizer": {
-            "enabled": false,
-            "runs": 200
-          },
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [
-        "./IERC20.sol",
-        "./extensions/IERC20Metadata.sol",
-        "../../utils/Context.sol"
-      ],
-      "versionPragmas": [
-        "^0.8.0"
-      ],
-      "artifacts": [
-        "ERC20"
-      ]
-    },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\token\\ERC20\\IERC20.sol": {
-      "lastModificationDate": 1747384318698,
-      "contentHash": "df36f7051335cd1e748b1b6463b7fdd3",
-      "sourceName": "@openzeppelin/contracts/token/ERC20/IERC20.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "evmVersion": "paris",
-          "optimizer": {
-            "enabled": false,
-            "runs": 200
-          },
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [],
-      "versionPragmas": [
-        "^0.8.0"
-      ],
-      "artifacts": [
-        "IERC20"
-      ]
-    },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\token\\ERC20\\extensions\\IERC20Metadata.sol": {
-      "lastModificationDate": 1747384318707,
-      "contentHash": "909ab67fc5c25033fe6cd364f8c056f9",
-      "sourceName": "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "evmVersion": "paris",
-          "optimizer": {
-            "enabled": false,
-            "runs": 200
-          },
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [
-        "../IERC20.sol"
-      ],
-      "versionPragmas": [
-        "^0.8.0"
-      ],
-      "artifacts": [
-        "IERC20Metadata"
-      ]
-    },
-    "D:\\CODE\\ml\\ML-20250516-1\\contracts\\rewards\\DynamicRewards.sol": {
-      "lastModificationDate": 1747406719350,
-      "contentHash": "758f6206a41126fae1c544b84bd02451",
-      "sourceName": "contracts/rewards/DynamicRewards.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "evmVersion": "paris",
-          "optimizer": {
-            "enabled": false,
-            "runs": 200
-          },
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [
-        "@openzeppelin/contracts/token/ERC20/IERC20.sol",
-        "@openzeppelin/contracts/access/AccessControl.sol",
-        "@openzeppelin/contracts/security/ReentrancyGuard.sol",
-        "../../libraries/StakingConstants.sol"
-      ],
-      "versionPragmas": [
-        "0.8.20"
-      ],
-      "artifacts": [
-        "DynamicRewards"
-      ]
-    },
-    "D:\\CODE\\ml\\ML-20250516-1\\libraries\\StakingConstants.sol": {
-      "lastModificationDate": 1747384316667,
-      "contentHash": "6586860ce318bb2308dd921747e02be5",
-      "sourceName": "libraries/StakingConstants.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "evmVersion": "paris",
-          "optimizer": {
-            "enabled": false,
-            "runs": 200
-          },
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [],
-      "versionPragmas": [
-        "0.8.20"
-      ],
-      "artifacts": [
-        "StakingConstants"
-      ]
-    },
-    "D:\\CODE\\ml\\ML-20250516-1\\contracts\\rewards\\BaseRewards.sol": {
-      "lastModificationDate": 1747406693774,
-      "contentHash": "95816ae5b182dab27dfb4965cec91d37",
-      "sourceName": "contracts/rewards/BaseRewards.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "evmVersion": "paris",
-          "optimizer": {
-            "enabled": false,
-            "runs": 200
-          },
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [
-        "@openzeppelin/contracts/token/ERC20/ERC20.sol",
-        "@openzeppelin/contracts/access/Ownable.sol",
-        "@openzeppelin/contracts/security/ReentrancyGuard.sol",
-        "../../libraries/StakingConstants.sol"
-      ],
-      "versionPragmas": [
-        "0.8.20"
-      ],
-      "artifacts": [
-        "BaseRewards"
-      ]
-    },
-    "D:\\CODE\\ml\\ML-20250516-1\\contracts\\market\\PropertyMarket.sol": {
-      "lastModificationDate": 1747406874868,
-      "contentHash": "26aec6bba58ca77adb00e4cc3e7289e2",
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\contracts\\market\\PropertyMarket.sol": {
+      "lastModificationDate": 1749566544885,
+      "contentHash": "d39f5de94a982ab03a8a44cbb4cb2ef6",
       "sourceName": "contracts/market/PropertyMarket.sol",
       "solcConfig": {
         "version": "0.8.20",
@@ -1220,83 +1295,7 @@
         "PropertyMarket"
       ]
     },
-    "D:\\CODE\\ml\\ML-20250516-1\\contracts\\tokens\\LifeToken.sol": {
-      "lastModificationDate": 1747410872249,
-      "contentHash": "ff1a4ede96d392dc1b284bfa734bf635",
-      "sourceName": "contracts/tokens/LifeToken.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "evmVersion": "paris",
-          "optimizer": {
-            "enabled": false,
-            "runs": 200
-          },
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [
-        "@openzeppelin/contracts/token/ERC20/ERC20.sol",
-        "@openzeppelin/contracts/access/Ownable.sol",
-        "@openzeppelin/contracts/utils/math/SafeMath.sol"
-      ],
-      "versionPragmas": [
-        "0.8.20"
-      ],
-      "artifacts": [
-        "LifeToken"
-      ]
-    },
-    "D:\\CODE\\ml\\ML-20250516-1\\node_modules\\@openzeppelin\\contracts\\utils\\math\\SafeMath.sol": {
-      "lastModificationDate": 1747384318760,
-      "contentHash": "f6f4fda16c536e57069af40a245c985e",
-      "sourceName": "@openzeppelin/contracts/utils/math/SafeMath.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "evmVersion": "paris",
-          "optimizer": {
-            "enabled": false,
-            "runs": 200
-          },
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [],
-      "versionPragmas": [
-        "^0.8.0"
-      ],
-      "artifacts": [
-        "SafeMath"
-      ]
-    },
-    "D:\\CODE\\ml\\ML-20250516-1\\contracts\\libraries\\StakingConstants.sol": {
+    "D:\\CODE\\BaiduSyncdisk\\ml\\ML-20250516-2\\contracts\\libraries\\StakingConstants.sol": {
       "lastModificationDate": 1747384316595,
       "contentHash": "26c6e34fe22fe57e9fc03345b6d3487f",
       "sourceName": "contracts/libraries/StakingConstants.sol",
