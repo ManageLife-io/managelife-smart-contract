@@ -53,7 +53,7 @@ contract LifeToken is ERC20, Ownable {
     bool public initialDistributionDone; // Initial distribution status
     
     RebaseConfig public rebaseConfig;     // Rebase configuration
-    mapping(address => bool) private _isExcluded; // Excluded addresses list (renamed for clarity)
+    mapping(address => bool) private _isExcludedFromRebase; // Excluded addresses list (renamed for clarity)
     mapping(address => uint256) private _baseBalances;      // Base balance storage
     mapping(address => BaseBalanceRecord[]) private _baseBalanceHistory; // Historical balance records
     
@@ -93,9 +93,11 @@ contract LifeToken is ERC20, Ownable {
     /// @param initialOwner_ The address that will receive initial ownership and control
     constructor(address initialOwner_)
         ERC20("ManageLife Token", "Life")
-        Ownable()
     {
         require(initialOwner_ != address(0), "Zero address not allowed");
+        
+        // Transfer ownership to the specified address
+        _transferOwnership(initialOwner_);
         
         rebaser = initialOwner_;
         distributor = initialOwner_;
@@ -108,6 +110,8 @@ contract LifeToken is ERC20, Ownable {
         });
 
         _baseBalances[address(this)] = INITIAL_SUPPLY;
+        _totalBaseBalance = INITIAL_SUPPLY;
+        
         emit Transfer(address(0), address(this), INITIAL_SUPPLY);
     }
 
@@ -129,14 +133,14 @@ contract LifeToken is ERC20, Ownable {
             "Rebase interval not met"
         );
         
+        // Use SafeMath-like checks for precision
+        require(newRebaseFactor > 0, "Invalid rebase factor");
+        require(newRebaseFactor <= MAX_REBASE_FACTOR, "Rebase factor too high");
+        
         // Calculate new supply with higher precision
         uint256 newSupply = (_totalBaseBalance * newRebaseFactor) / REBASE_FACTOR_PRECISION;
         require(newSupply <= MAX_SUPPLY, "Supply exceeds maximum");
         require(newSupply >= MIN_SUPPLY, "Supply below minimum");
-        
-        // Use SafeMath-like checks for precision
-        require(newRebaseFactor > 0, "Invalid rebase factor");
-        require(newRebaseFactor <= MAX_REBASE_FACTOR, "Rebase factor too high");
         
         uint256 oldFactor = rebaseConfig.rebaseFactor;
         
@@ -148,6 +152,17 @@ contract LifeToken is ERC20, Ownable {
         emit Rebase(rebaseConfig.epoch, oldFactor, newRebaseFactor);
     }
     
+    /// @notice Returns the balance of an account after applying rebase factor
+    /// @dev Accounts for whether the account is excluded from rebase
+    /// @param account The address to check balance for
+    /// @return The current balance of the account
+    function balanceOf(address account) public view override returns (uint256) {
+        if (_isExcludedFromRebase[account]) {
+            return _baseBalances[account];
+        }
+        return (_baseBalances[account] * rebaseConfig.rebaseFactor) / REBASE_FACTOR_PRECISION;
+    }
+
     /// @notice Returns the total token supply after applying rebase factor
     /// @dev Accounts for both rebased and excluded token portions
     /// @return The current total supply
@@ -178,7 +193,7 @@ contract LifeToken is ERC20, Ownable {
         // Convert amount to base balance with higher precision
         uint256 baseAmount;
         
-        if (_isExcluded[from]) {
+        if (_isExcludedFromRebase[from]) {
             // From excluded: amount is already in base terms
             baseAmount = amount;
         } else {
@@ -193,17 +208,13 @@ contract LifeToken is ERC20, Ownable {
         _baseBalances[to] += baseAmount;
         
         // Update excluded totals if necessary
-        if (_isExcluded[from] && !_isExcluded[to]) {
+        if (_isExcludedFromRebase[from] && !_isExcludedFromRebase[to]) {
             // From excluded to non-excluded
             _totalBaseBalanceExcluded -= baseAmount;
-        } else if (!_isExcluded[from] && _isExcluded[to]) {
+        } else if (!_isExcludedFromRebase[from] && _isExcludedFromRebase[to]) {
             // From non-excluded to excluded
             _totalBaseBalanceExcluded += baseAmount;
         }
-        
-        // Calculate display amounts for event
-        uint256 fromAmount = _isExcluded[from] ? amount : (baseAmount * rebaseConfig.rebaseFactor) / REBASE_FACTOR_PRECISION;
-        uint256 toAmount = _isExcluded[to] ? amount : (baseAmount * rebaseConfig.rebaseFactor) / REBASE_FACTOR_PRECISION;
         
         emit Transfer(from, to, amount);
     }
@@ -235,13 +246,13 @@ contract LifeToken is ERC20, Ownable {
     /// @param account_ The address to exclude from rebase
     function excludeFromRebase(address account_) external onlyOwner {
         require(account_ != address(0), "Zero address not allowed");
-        bool previousExclusion = _isExcluded[account_];
+        bool previousExclusion = _isExcludedFromRebase[account_];
         require(!previousExclusion, "Account already excluded");
         
-        // 更新排除账户的基础余额总和
+        // Update total base balance for excluded accounts
         _totalBaseBalanceExcluded = _totalBaseBalanceExcluded.add(_baseBalances[account_]);
         
-        _isExcluded[account_] = true;
+        _isExcludedFromRebase[account_] = true;
         emit ExcludedFromRebase(account_, previousExclusion, true);
     }
 
@@ -250,13 +261,13 @@ contract LifeToken is ERC20, Ownable {
     /// @param account The address to include in rebase
     function includeInRebase(address account) external onlyOwner {
         require(account != address(0), "Zero address not allowed");
-        bool previousExclusion = _isExcluded[account];
+        bool previousExclusion = _isExcludedFromRebase[account];
         require(previousExclusion, "Account not excluded");
         
-        // 从排除账户的基础余额总和中减去
+        // Subtract from total base balance of excluded accounts
         _totalBaseBalanceExcluded = _totalBaseBalanceExcluded.sub(_baseBalances[account]);
         
-        _isExcluded[account] = false;
+        _isExcludedFromRebase[account] = false;
         emit ExcludedFromRebase(account, previousExclusion, false);
     }
 
@@ -268,15 +279,16 @@ contract LifeToken is ERC20, Ownable {
         uint256 currentTotal = totalSupply();
         require(currentTotal < MAX_SUPPLY, "Max supply already minted");
         uint256 remaining = MAX_SUPPLY - currentTotal;
-        uint256 baseAmount = _isExcluded[recipient]
+        uint256 baseAmount = _isExcludedFromRebase[recipient]
             ? remaining  // Excluded: mint token amount directly
             : remaining.mul(TOKEN_UNIT).div(rebaseConfig.rebaseFactor);  // Non-excluded: convert to base units
         
         uint256 oldBalance = _baseBalances[recipient];
         _baseBalances[recipient] += baseAmount;
+        _totalBaseBalance += baseAmount;
         
-        // 如果接收者是排除在rebase外的地址，需要更新排除地址的总余额
-        if (_isExcluded[recipient]) {
+        // If recipient is excluded from rebase, update excluded total balance
+        if (_isExcludedFromRebase[recipient]) {
             _totalBaseBalanceExcluded = _totalBaseBalanceExcluded.add(baseAmount);
         }
         
@@ -299,11 +311,11 @@ contract LifeToken is ERC20, Ownable {
     /// @return Boolean indicating exclusion status
     function isExcludedFromRebase(address account) external view returns (bool) {
         require(account != address(0), "Zero address not allowed");
-        return _isExcluded[account];
+        return _isExcludedFromRebase[account];
     }
 
-    /// @notice 获取被排除在rebase外的地址的基础余额总和
-    /// @return 排除地址的基础余额总和
+    /// @notice Gets the total base balance of addresses excluded from rebase
+    /// @return Total base balance of excluded addresses
     function getExcludedFromRebaseTotal() external view returns (uint256) {
         return _totalBaseBalanceExcluded;
     }

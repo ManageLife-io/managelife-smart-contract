@@ -1,5 +1,9 @@
 require('hardhat-contract-sizer');
 
+require("@nomiclabs/hardhat-waffle");
+require("@nomiclabs/hardhat-ethers");
+require("hardhat-contract-sizer");
+
 module.exports = {
   solidity: {
     version: "0.8.20",
@@ -11,7 +15,9 @@ module.exports = {
     }
   },
   networks: {
-    hardhat: {}
+    hardhat: {
+      chainId: 31337
+    }
   },
   paths: {
     sources: "./contracts",

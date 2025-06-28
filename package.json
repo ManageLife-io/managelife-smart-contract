@@ -1,7 +1,33 @@
 {
+  "name": "mlife-smart-contracts",
+  "version": "1.0.0",
+  "description": "Smart contracts for MLife RWA platform",
+  "scripts": {
+    "compile": "npx hardhat compile",
+    "test": "npx hardhat test",
+    "test:all": "node tests/runTests.js",
+    "test:lifetoken": "npx hardhat test tests/LifeToken.test.js",
+    "test:nft": "npx hardhat test tests/NFT.test.js",
+    "test:market": "npx hardhat test tests/PropertyMarket.test.js",
+    "test:rewards": "npx hardhat test tests/Rewards.test.js",
+    "test:admin": "npx hardhat test tests/AdminControl.test.js",
+    "test:coverage": "npx hardhat coverage",
+    "deploy:local": "npx hardhat run scripts/deploy_with_ethers.ts --network hardhat",
+    "clean": "npx hardhat clean"
+  },
   "devDependencies": {
     "@openzeppelin/contracts": "^4.9.6",
     "hardhat": "^2.22.19",
-    "hardhat-contract-sizer": "^2.10.0"
+    "hardhat-contract-sizer": "^2.10.0",
+    "@nomiclabs/hardhat-ethers": "^2.2.3",
+    "@nomiclabs/hardhat-waffle": "^2.0.6",
+    "chai": "^4.3.10",
+    "ethereum-waffle": "^4.0.10",
+    "ethers": "^5.7.2",
+    "hardhat-gas-reporter": "^1.0.10",
+    "solidity-coverage": "^0.8.5"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts-upgradeable": "^4.9.6"
   }
 }

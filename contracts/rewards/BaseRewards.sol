@@ -412,7 +412,7 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     /// @dev Internal helper function
     /// @param user The user address
     /// @return hasLeases True if user has active leases
-    function _hasActiveLeases(address user) internal view returns (bool hasLeases) {
+    function _hasActiveLeases(address user) internal pure returns (bool hasLeases) {
         // This is a simplified implementation
         // In a real scenario, this would check against a lease registry
         return user != address(0); // Placeholder logic

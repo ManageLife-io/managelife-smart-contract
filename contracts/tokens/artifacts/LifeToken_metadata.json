@@ -590,7 +590,7 @@
 					"details": "See {IERC20-approve}. NOTE: If `amount` is the maximum `uint256`, the allowance is not updated on `transferFrom`. This is semantically equivalent to an infinite approval. Requirements: - `spender` cannot be the zero address."
 				},
 				"balanceOf(address)": {
-					"details": "获取调整后的余额"
+					"details": "Get adjusted balance"
 				},
 				"decimals()": {
 					"details": "Returns the number of decimals used to get its user representation. For example, if `decimals` equals `2`, a balance of `505` tokens should be displayed to a user as `5.05` (`505 / 10 ** 2`). Tokens usually opt for a value of 18, imitating the relationship between Ether and Wei. This is the default value returned by this function, unless it's overridden. NOTE: This information is only used for _display_ purposes: it in no way affects any of the arithmetic of the contract, including {IERC20-balanceOf} and {IERC20-transfer}."
@@ -602,10 +602,10 @@
 					"details": "Atomically increases the allowance granted to `spender` by the caller. This is an alternative to {approve} that can be used as a mitigation for problems described in {IERC20-approve}. Emits an {Approval} event indicating the updated allowance. Requirements: - `spender` cannot be the zero address."
 				},
 				"initialDistribution(address[],uint256[])": {
-					"details": "初始代币分发",
+					"details": "Initial token distribution",
 					"params": {
-						"amounts_": "分配数量数组（单位：百万枚）",
-						"recipients_": "接收地址数组"
+						"amounts_": "Distribution amount array (unit: millions)",
+						"recipients_": "Recipient address array"
 					}
 				},
 				"name()": {
@@ -615,9 +615,9 @@
 					"details": "Returns the address of the current owner."
 				},
 				"rebase(uint256)": {
-					"details": "执行供应量调整",
+					"details": "Execute supply adjustment",
 					"params": {
-						"newFactor_": "新调整系数（1e18为基础，例如1.1e18表示+10%）"
+						"newFactor_": "New adjustment factor (1e18 as base, e.g. 1.1e18 means +10%)"
 					}
 				},
 				"renounceOwnership()": {
@@ -627,7 +627,7 @@
 					"details": "Returns the symbol of the token, usually a shorter version of the name."
 				},
 				"totalSupply()": {
-					"details": "获取调整后的总供应量"
+					"details": "Get adjusted total supply"
 				},
 				"transfer(address,uint256)": {
 					"details": "See {IERC20-transfer}. Requirements: - `to` cannot be the zero address. - the caller must have a balance of at least `amount`."
