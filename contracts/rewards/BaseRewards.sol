@@ -4,6 +4,7 @@ pragma solidity 0.8.20;
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "../../libraries/StakingConstants.sol";
 
 // Admin control interface
@@ -15,7 +16,7 @@ interface IAdminControl {
 /// @notice Implements a staking mechanism where users can stake tokens and earn rewards
 /// @dev Inherits from Ownable for access control and ReentrancyGuard for security
 contract BaseRewards is Ownable, ReentrancyGuard {
-    // SafeMath no longer needed in Solidity 0.8.x
+    using SafeMath for uint256; // Enhanced overflow protection
     uint256 public constant MIN_STAKING_PERIOD = StakingConstants.MIN_STAKING_PERIOD;
     uint256 public constant BASIS_POINTS = 10000;
     uint256 public constant MAX_STAKING_DAYS = 3650; // 10 years
@@ -312,19 +313,14 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         uint256 timeMultiplier = stakingDuration / 1 days; // Convert to days
         require(timeMultiplier <= MAX_STAKING_DAYS, "Staking duration too long");
         
-        // Safe multiplication with overflow protection
+        // Enhanced safe multiplication with SafeMath and overflow protection
         uint256 baseReward;
-        unchecked {
-            // Check for potential overflow before multiplication
-            if (stakingAmount > type(uint256).max / baseRate) {
-                revert("Calculation would overflow");
-            }
-            baseReward = stakingAmount * baseRate;
-            
-            if (baseReward > type(uint256).max / timeMultiplier) {
-                revert("Calculation would overflow");
-            }
-            baseReward = (baseReward * timeMultiplier) / BASIS_POINTS;
+
+        // Use SafeMath for all calculations to ensure maximum safety
+        try this._safeCalculateBaseReward(stakingAmount, baseRate, timeMultiplier) returns (uint256 result) {
+            baseReward = result;
+        } catch {
+            revert("Base reward calculation overflow");
         }
         
         // Get community bonus with safe calculations
@@ -352,7 +348,29 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         
         return totalReward;
     }
-    
+
+    /// @notice Safe calculation helper for base rewards (external for try-catch)
+    /// @dev Uses SafeMath for enhanced overflow protection
+    /// @param stakingAmount The staking amount
+    /// @param baseRate The base reward rate
+    /// @param timeMultiplier The time multiplier
+    /// @return result The calculated base reward
+    function _safeCalculateBaseReward(uint256 stakingAmount, uint256 baseRate, uint256 timeMultiplier) external pure returns (uint256 result) {
+        // Double-check inputs
+        require(stakingAmount > 0, "Invalid staking amount");
+        require(baseRate > 0, "Invalid base rate");
+        require(timeMultiplier > 0, "Invalid time multiplier");
+
+        // Use SafeMath for maximum safety
+        uint256 intermediate = stakingAmount.mul(baseRate);
+        result = intermediate.mul(timeMultiplier).div(BASIS_POINTS);
+
+        // Additional sanity check
+        require(result <= MAX_REWARD_AMOUNT, "Result exceeds maximum reward");
+
+        return result;
+    }
+
     /// @notice Calculates community participation bonus
     /// @dev Internal function with optimized calculations
     /// @param user The user address

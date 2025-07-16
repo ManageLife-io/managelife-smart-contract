@@ -4,6 +4,7 @@ pragma solidity 0.8.20;
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /// @title LifeToken - An ERC20 token with elastic supply mechanism
 /// @notice This contract implements a rebasing ERC20 token with initial distribution functionality
@@ -14,7 +15,7 @@ import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 ///      - Initial token distribution system
 ///      - Exclusion of addresses from rebase effects
 ///      - Owner-controlled rebase parameters
-contract LifeToken is ERC20, Ownable {
+contract LifeToken is ERC20, Ownable, ReentrancyGuard {
     using SafeMath for uint256;
     
     address private _pendingOwner;
@@ -65,7 +66,8 @@ contract LifeToken is ERC20, Ownable {
     // Events
     // =============================
     event Rebase(uint256 indexed epoch, uint256 oldFactor, uint256 newFactor);
-    
+    event EmergencyRebase(uint256 indexed epoch, uint256 oldFactor, uint256 newFactor, address indexed caller);
+
     uint256 public rebaseEpoch; // Track number of rebase operations
     event RebaserUpdated(address indexed newRebaser);
     event DistributorUpdated(address indexed newDistributor);
@@ -125,33 +127,71 @@ contract LifeToken is ERC20, Ownable {
      */
 
     /// @notice Performs a rebase operation to adjust token supply
-    /// @dev Only callable by the rebaser, with minimum interval enforcement
+    /// @dev Only callable by the rebaser, with minimum interval enforcement and change limits
     /// @param newRebaseFactor The new rebase factor (scaled by 1e18)
     function rebase(uint256 newRebaseFactor) external onlyRebaser {
         require(
             block.timestamp >= rebaseConfig.lastRebaseTimestamp + rebaseConfig.minRebaseInterval,
             "Rebase interval not met"
         );
-        
+
         // Use SafeMath-like checks for precision
         require(newRebaseFactor > 0, "Invalid rebase factor");
         require(newRebaseFactor <= MAX_REBASE_FACTOR, "Rebase factor too high");
-        
+
+        // Add protection against extreme rebase changes (audit fix)
+        uint256 currentFactor = rebaseConfig.rebaseFactor;
+        uint256 maxChangePercent = 20; // Maximum 20% change per rebase
+        uint256 maxIncrease = currentFactor * (100 + maxChangePercent) / 100;
+        uint256 maxDecrease = currentFactor * (100 - maxChangePercent) / 100;
+
+        require(
+            newRebaseFactor <= maxIncrease && newRebaseFactor >= maxDecrease,
+            "Rebase change exceeds maximum allowed (20%)"
+        );
+
         // Calculate new supply with higher precision
         uint256 newSupply = (_totalBaseBalance * newRebaseFactor) / REBASE_FACTOR_PRECISION;
         require(newSupply <= MAX_SUPPLY, "Supply exceeds maximum");
         require(newSupply >= MIN_SUPPLY, "Supply below minimum");
-        
+
         uint256 oldFactor = rebaseConfig.rebaseFactor;
-        
+
         // Update rebase configuration
         rebaseConfig.rebaseFactor = newRebaseFactor;
         rebaseConfig.lastRebaseTimestamp = block.timestamp;
         rebaseConfig.epoch++;
-        
+
         emit Rebase(rebaseConfig.epoch, oldFactor, newRebaseFactor);
     }
-    
+
+    /// @notice Emergency rebase function that bypasses the 20% change limit
+    /// @dev Only callable by the contract owner in emergency situations
+    /// @param newRebaseFactor The new rebase factor (scaled by 1e18)
+    function emergencyRebase(uint256 newRebaseFactor) external onlyOwner {
+        require(
+            block.timestamp >= rebaseConfig.lastRebaseTimestamp + rebaseConfig.minRebaseInterval,
+            "Rebase interval not met"
+        );
+
+        require(newRebaseFactor > 0, "Invalid rebase factor");
+        require(newRebaseFactor <= MAX_REBASE_FACTOR, "Rebase factor too high");
+
+        // Calculate new supply with higher precision
+        uint256 newSupply = (_totalBaseBalance * newRebaseFactor) / REBASE_FACTOR_PRECISION;
+        require(newSupply <= MAX_SUPPLY, "Supply exceeds maximum");
+        require(newSupply >= MIN_SUPPLY, "Supply below minimum");
+
+        uint256 oldFactor = rebaseConfig.rebaseFactor;
+
+        // Update rebase configuration
+        rebaseConfig.rebaseFactor = newRebaseFactor;
+        rebaseConfig.lastRebaseTimestamp = block.timestamp;
+        rebaseConfig.epoch++;
+
+        emit EmergencyRebase(rebaseConfig.epoch, oldFactor, newRebaseFactor, msg.sender);
+    }
+
     /// @notice Returns the balance of an account after applying rebase factor
     /// @dev Accounts for whether the account is excluded from rebase
     /// @param account The address to check balance for
@@ -172,6 +212,27 @@ contract LifeToken is ERC20, Ownable {
         
         // Add excluded portion (not affected by rebase)
         return rebasedPortion + _totalBaseBalanceExcluded;
+    }
+
+    // =============================
+    // Public Transfer Functions with Reentrancy Protection
+    // =============================
+
+    /// @notice Transfer tokens with reentrancy protection
+    /// @param to The recipient address
+    /// @param amount The amount to transfer
+    /// @return success True if transfer succeeded
+    function transfer(address to, uint256 amount) public override nonReentrant returns (bool) {
+        return super.transfer(to, amount);
+    }
+
+    /// @notice Transfer tokens from one address to another with reentrancy protection
+    /// @param from The sender address
+    /// @param to The recipient address
+    /// @param amount The amount to transfer
+    /// @return success True if transfer succeeded
+    function transferFrom(address from, address to, uint256 amount) public override nonReentrant returns (bool) {
+        return super.transferFrom(from, to, amount);
     }
 
     // =============================

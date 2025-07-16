@@ -43,6 +43,17 @@ library Errors {
     string constant PAYMENT_FAILED = "Payment failed";
     string constant NOT_SELLER = "Not the seller";
     string constant CANNOT_BID_OWN_LISTING = "Cannot bid on your own listing";
+    string constant ETH_AMOUNT_MISMATCH = "ETH amount mismatch";
+    string constant ETH_REFUND_FAILED = "ETH refund failed";
+    string constant BID_MUST_MEET_PRICE = "Bid must meet listing price";
+    string constant NO_BIDS_AVAILABLE = "No bids available";
+    string constant NO_PENDING_PAYMENT = "No pending payment";
+    string constant EXCESS_REFUND_FAILED = "Excess refund failed";
+    string constant BID_INCREMENT_LOW = "Bid increment too low";
+    string constant BID_AMOUNT_TOO_LARGE = "Bid amount too large";
+    string constant CANNOT_CHANGE_TOKEN = "Cannot change payment token";
+    string constant ETH_DEFAULT_ALLOWED = "ETH is allowed by default";
+    string constant CANNOT_REMOVE_ETH = "Cannot remove ETH as payment method";
     
     // ========== Bidding Errors ==========
     string constant NO_ACTIVE_BID = "No active bid found";
@@ -53,9 +64,7 @@ library Errors {
     string constant BIDDER_MISMATCH = "Bidder mismatch";
     string constant AMOUNT_MISMATCH = "Amount mismatch";
     string constant PAYMENT_TOKEN_MISMATCH = "Payment token mismatch";
-    string constant ETH_AMOUNT_MISMATCH = "ETH amount mismatch";
     string constant INSUFFICIENT_ETH_DEPOSIT = "Insufficient ETH deposit";
-    string constant CANNOT_CHANGE_PAYMENT_TOKEN = "Cannot change payment token";
     
     // ========== Staking Errors ==========
     string constant INSUFFICIENT_STAKE = "Insufficient stake";
@@ -95,4 +104,18 @@ library Errors {
     string constant INVALID_PROOF = "Invalid proof";
     string constant OUT_OF_BOUNDS = "Out of bounds";
     string constant ARRAY_LENGTH_MISMATCH = "Array length mismatch";
+
+    // ========== MA2-02 Mitigation Errors ==========
+    string constant TIMELOCK_NOT_SET = "Timelock not configured";
+    string constant MULTISIG_NOT_SET = "MultiSig not configured";
+    string constant INVALID_TIMELOCK = "Invalid timelock address";
+    string constant INVALID_MULTISIG = "Invalid multisig address";
+    string constant TIMELOCK_ALREADY_SET = "Timelock already configured";
+    string constant MULTISIG_ALREADY_SET = "MultiSig already configured";
+    string constant MUST_USE_TIMELOCK = "Must be called through timelock";
+
+    // ========== Bidding Mechanism Fix Errors ==========
+    string constant MUST_OUTBID_HIGHEST = "Must exceed highest active bid";
+    string constant PURCHASE_AMOUNT_MISMATCH = "Purchase amount mismatch";
+    // Note: TRANSFER_FAILED and EXCESS_REFUND_FAILED already defined above
 }

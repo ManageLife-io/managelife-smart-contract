@@ -40,18 +40,18 @@ library PaymentProcessor {
     ) internal {
         uint256 fees = (amount * config.baseFee) / config.percentageBase;
         uint256 netValue = amount - fees;
-        
+
         if (paymentToken == address(0)) {
             _processETHPayment(seller, config.feeCollector, netValue, fees, buyer, amount);
         } else {
             _processTokenPayment(paymentToken, buyer, seller, config.feeCollector, netValue, fees);
         }
-        
+
         emit PaymentProcessed(seller, buyer, amount, fees, paymentToken);
     }
     
     /// @notice Processes ETH payments
-    /// @dev Internal function to handle ETH transfers with fee deduction
+    /// @dev Internal function to handle ETH transfers with fee deduction from msg.value
     /// @param seller Address to receive the net payment
     /// @param feeCollector Address to receive the fees
     /// @param netValue Amount to send to seller (after fees)
@@ -67,21 +67,22 @@ library PaymentProcessor {
         uint256 totalAmount
     ) private {
         require(msg.value >= totalAmount, "Insufficient ETH sent");
-        
+
         // Send payment to seller
         (bool successSeller, ) = payable(seller).call{value: netValue}("");
         require(successSeller, "Payment to seller failed");
-        
+
         // Send fee to collector
         (bool successFee, ) = payable(feeCollector).call{value: fees}("");
         require(successFee, "Fee payment failed");
-        
-        // Handle excess ETH refund with gas limit to prevent griefing
+
+        // Handle excess ETH refund with improved gas handling
         uint256 excess = msg.value - totalAmount;
         if (excess > 0) {
-            // Use limited gas to prevent gas griefing attacks
-            (bool successRefund, ) = payable(buyer).call{value: excess, gas: 2300}("");
-            require(successRefund, "Refund failed");
+            // Use higher gas limit to accommodate modern contracts
+            // Increased from 2300 to 10000 gas to handle modern contracts
+            (bool successRefund, ) = payable(buyer).call{value: excess, gas: 10000}("");
+            require(successRefund, "Refund failed - consider using pull pattern");
         }
     }
     

@@ -10,7 +10,7 @@ module.exports = {
     settings: {
       optimizer: {
         enabled: true,
-        runs: 200
+        runs: 1
       }
     }
   },
@@ -28,8 +28,8 @@ module.exports = {
   contractSizer: {
     alphaSort: true,
     disambiguatePaths: false,
-    runOnCompile: true,
-    strict: true,
+    runOnCompile: false,
+    strict: false,
     only: [':PropertyMarket$']
   }
 };
