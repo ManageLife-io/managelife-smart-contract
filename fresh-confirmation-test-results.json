@@ -1,0 +1,20 @@
+{
+  "network": {
+    "chainId": 31337,
+    "name": "unknown"
+  },
+  "contracts": {
+    "PropertyMarket": "0x610178dA211FEF7D417bC0e6FeD39F05609AD788",
+    "NFTI": "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6",
+    "NFTM": "0x8A791620dd6260079BF849Dc5567aDC3F2FdC318"
+  },
+  "testResults": {
+    "nftMinted": true,
+    "propertyListed": true,
+    "purchaseSubmitted": false,
+    "wasConfirmationBased": true,
+    "wasImmediate": false,
+    "finalOwnershipCorrect": false
+  },
+  "testTime": "2025-07-21T17:06:27.350Z"
+}

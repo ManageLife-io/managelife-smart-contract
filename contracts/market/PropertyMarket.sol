@@ -26,8 +26,8 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
     uint256 public constant PERCENTAGE_BASE = 10000; // Base for percentage calculations (100% = 10000)
     
     // ========== Data Structures ==========
-    enum PropertyStatus { LISTED, RENTED, SOLD, DELISTED, PENDING_PAYMENT }
-    
+    enum PropertyStatus { LISTED, RENTED, SOLD, DELISTED, PENDING_PAYMENT, PENDING_SELLER_CONFIRMATION }
+
     struct Bid {
         uint256 tokenId;
         address bidder;
@@ -36,7 +36,7 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
         uint256 bidTimestamp;
         bool isActive;
     }
-    
+
     struct PropertyListing {
         uint256 tokenId;
         address seller;
@@ -45,6 +45,17 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
         PropertyStatus status;
         uint256 listTimestamp;
         uint256 lastRenewed;
+        uint256 confirmationPeriod;  // Seller confirmation time in seconds
+    }
+
+    struct PendingPurchase {
+        uint256 tokenId;
+        address buyer;
+        uint256 offerPrice;
+        address paymentToken;
+        uint256 purchaseTimestamp;
+        uint256 confirmationDeadline;
+        bool isActive;
     }
 
     // ========== State Variables ==========
@@ -63,8 +74,14 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
     // Token whitelist for payments
     mapping(address => bool) public allowedPaymentTokens;
     bool public whitelistEnabled = true; // Enable/disable whitelist functionality
-    
+
     mapping(uint256 => PropertyListing) public listings;
+
+    // Pending purchase orders awaiting seller confirmation
+    mapping(uint256 => PendingPurchase) public pendingPurchases;
+
+    // Default confirmation period (24 hours)
+    uint256 public constant DEFAULT_CONFIRMATION_PERIOD = 24 hours;
     // Removed unused leaseTerms mapping
     
     // Bidding related mappings
@@ -155,6 +172,38 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
         uint256 amount
     );
 
+    // Seller confirmation period related events
+    event PurchaseRequested(
+        uint256 indexed tokenId,
+        address indexed buyer,
+        uint256 offerPrice,
+        address paymentToken,
+        uint256 confirmationDeadline
+    );
+
+    event PurchaseConfirmed(
+        uint256 indexed tokenId,
+        address indexed seller,
+        address indexed buyer,
+        uint256 finalPrice,
+        address paymentToken
+    );
+
+    event PurchaseRejected(
+        uint256 indexed tokenId,
+        address indexed seller,
+        address indexed buyer,
+        uint256 offerPrice,
+        address paymentToken
+    );
+
+    event PurchaseExpired(
+        uint256 indexed tokenId,
+        address indexed buyer,
+        uint256 offerPrice,
+        address paymentToken
+    );
+
     // ========== Constructor ==========
     // Constructor moved to the top of the contract
     
@@ -232,6 +281,31 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
         uint256 price,
         address paymentToken
     ) external nonReentrant onlyKYCVerified onlyAllowedToken(paymentToken) onlyValidAmount(price) {
+        _listPropertyWithConfirmation(tokenId, price, paymentToken, 0);
+    }
+
+    /// @notice Lists a property NFT for sale with seller confirmation period
+    /// @param tokenId The ID of the NFT to list
+    /// @param price The listing price
+    /// @param paymentToken The accepted payment token
+    /// @param confirmationPeriod Time in seconds for seller to confirm purchases (0 = instant sale)
+    function listPropertyWithConfirmation(
+        uint256 tokenId,
+        uint256 price,
+        address paymentToken,
+        uint256 confirmationPeriod
+    ) external nonReentrant onlyKYCVerified onlyAllowedToken(paymentToken) onlyValidAmount(price) {
+        require(confirmationPeriod <= 7 days, "Confirmation period too long"); // Maximum 7 days
+        _listPropertyWithConfirmation(tokenId, price, paymentToken, confirmationPeriod);
+    }
+
+    /// @notice Internal function to handle property listing
+    function _listPropertyWithConfirmation(
+        uint256 tokenId,
+        uint256 price,
+        address paymentToken,
+        uint256 confirmationPeriod
+    ) internal {
         require(nftiContract.ownerOf(tokenId) == msg.sender, ErrorCodes.E105);
         require(listings[tokenId].seller == address(0) || listings[tokenId].status != PropertyStatus.LISTED, ErrorCodes.E102);
 
@@ -242,7 +316,8 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
             paymentToken: paymentToken,
             status: PropertyStatus.LISTED,
             listTimestamp: block.timestamp,
-            lastRenewed: block.timestamp
+            lastRenewed: block.timestamp,
+            confirmationPeriod: confirmationPeriod
         });
 
         emit NewListing(tokenId, msg.sender, price, paymentToken);
@@ -258,16 +333,56 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
         uint256 highestBid = _getHighestActiveBid(tokenId);
         uint256 actualPrice = highestBid > 0 ? offerPrice : listing.price;
 
-        // Note: Payment token validation is handled in _validatePayment
+        // Check if seller confirmation is required
+        if (listing.confirmationPeriod > 0) {
+            // Case requiring seller confirmation
+            _createPendingPurchase(tokenId, actualPrice, listing.paymentToken);
+        } else {
+            // Case for immediate transaction
+            _completePurchase(tokenId, actualPrice, listing.paymentToken, highestBid);
+        }
+    }
+
+    /// @notice Create a pending purchase order awaiting confirmation
+    function _createPendingPurchase(uint256 tokenId, uint256 actualPrice, address paymentToken) internal {
+        PropertyListing storage listing = listings[tokenId];
+
+        // Lock buyer's funds
+        if (paymentToken == address(0)) {
+            require(msg.value >= actualPrice, "Insufficient ETH sent");
+        } else {
+            IERC20 token = IERC20(paymentToken);
+            require(token.transferFrom(msg.sender, address(this), actualPrice), "Token transfer failed");
+        }
+
+        // Set pending confirmation status
+        listing.status = PropertyStatus.PENDING_SELLER_CONFIRMATION;
+        uint256 deadline = block.timestamp + listing.confirmationPeriod;
+
+        pendingPurchases[tokenId] = PendingPurchase({
+            tokenId: tokenId,
+            buyer: msg.sender,
+            offerPrice: actualPrice,
+            paymentToken: paymentToken,
+            purchaseTimestamp: block.timestamp,
+            confirmationDeadline: deadline,
+            isActive: true
+        });
+
+        emit PurchaseRequested(tokenId, msg.sender, actualPrice, paymentToken, deadline);
+    }
+
+    /// @notice Complete the purchase transaction
+    function _completePurchase(uint256 tokenId, uint256 actualPrice, address paymentToken, uint256 highestBid) internal {
+        PropertyListing storage listing = listings[tokenId];
 
         listing.status = PropertyStatus.SOLD;
         _cancelAllBids(tokenId);
 
-        _processPayment(listing.seller, msg.sender, actualPrice, listing.paymentToken);
+        _processPayment(listing.seller, msg.sender, actualPrice, paymentToken);
         nftiContract.safeTransferFrom(listing.seller, msg.sender, tokenId, "");
 
-        // Emit appropriate events based on whether this was a competitive purchase
-        emit PropertySold(tokenId, msg.sender, actualPrice, listing.paymentToken);
+        emit PropertySold(tokenId, msg.sender, actualPrice, paymentToken);
 
         // If this purchase outbid existing bids, emit a competitive purchase event
         if (highestBid > 0) {
@@ -276,8 +391,84 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
                 msg.sender,
                 actualPrice,
                 highestBid,
-                listing.paymentToken
+                paymentToken
             );
+        }
+    }
+
+    /// @notice Seller confirms the purchase order
+    function confirmPurchase(uint256 tokenId) external nonReentrant {
+        PropertyListing storage listing = listings[tokenId];
+        PendingPurchase storage purchase = pendingPurchases[tokenId];
+
+        require(listing.status == PropertyStatus.PENDING_SELLER_CONFIRMATION, "No pending purchase");
+        require(purchase.isActive, "Purchase not active");
+        require(nftiContract.ownerOf(tokenId) == msg.sender, "Not the seller");
+        require(block.timestamp <= purchase.confirmationDeadline, "Confirmation period expired");
+
+        // Complete the transaction
+        purchase.isActive = false;
+        listing.status = PropertyStatus.SOLD;
+        _cancelAllBids(tokenId);
+
+        _processPayment(listing.seller, purchase.buyer, purchase.offerPrice, purchase.paymentToken);
+        nftiContract.safeTransferFrom(listing.seller, purchase.buyer, tokenId, "");
+
+        emit PurchaseConfirmed(tokenId, msg.sender, purchase.buyer, purchase.offerPrice, purchase.paymentToken);
+        emit PropertySold(tokenId, purchase.buyer, purchase.offerPrice, purchase.paymentToken);
+    }
+
+    /// @notice Seller rejects the purchase order
+    function rejectPurchase(uint256 tokenId) external nonReentrant {
+        PropertyListing storage listing = listings[tokenId];
+        PendingPurchase storage purchase = pendingPurchases[tokenId];
+
+        require(listing.status == PropertyStatus.PENDING_SELLER_CONFIRMATION, "No pending purchase");
+        require(purchase.isActive, "Purchase not active");
+        require(nftiContract.ownerOf(tokenId) == msg.sender, "Not the seller");
+        require(block.timestamp <= purchase.confirmationDeadline, "Confirmation period expired");
+
+        // Refund to buyer
+        _refundPendingPurchase(tokenId);
+
+        // Restore listing status
+        purchase.isActive = false;
+        listing.status = PropertyStatus.LISTED;
+
+        emit PurchaseRejected(tokenId, msg.sender, purchase.buyer, purchase.offerPrice, purchase.paymentToken);
+    }
+
+    /// @notice Buyer or anyone can cancel the order after confirmation period expires
+    function cancelExpiredPurchase(uint256 tokenId) external nonReentrant {
+        PropertyListing storage listing = listings[tokenId];
+        PendingPurchase storage purchase = pendingPurchases[tokenId];
+
+        require(listing.status == PropertyStatus.PENDING_SELLER_CONFIRMATION, "No pending purchase");
+        require(purchase.isActive, "Purchase not active");
+        require(block.timestamp > purchase.confirmationDeadline, "Confirmation period not expired");
+
+        // Refund to buyer
+        _refundPendingPurchase(tokenId);
+
+        // Restore listing status
+        purchase.isActive = false;
+        listing.status = PropertyStatus.LISTED;
+
+        emit PurchaseExpired(tokenId, purchase.buyer, purchase.offerPrice, purchase.paymentToken);
+    }
+
+    /// @notice Refund pending purchase order
+    function _refundPendingPurchase(uint256 tokenId) internal {
+        PendingPurchase storage purchase = pendingPurchases[tokenId];
+
+        if (purchase.paymentToken == address(0)) {
+            // Refund ETH
+            (bool success, ) = payable(purchase.buyer).call{value: purchase.offerPrice}("");
+            require(success, "ETH refund failed");
+        } else {
+            // Refund ERC20 tokens
+            IERC20 token = IERC20(purchase.paymentToken);
+            require(token.transfer(purchase.buyer, purchase.offerPrice), "Token refund failed");
         }
     }
 
@@ -439,7 +630,8 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
             uint256 price,
             address paymentToken,
             PropertyStatus status,
-            uint256 listTimestamp
+            uint256 listTimestamp,
+            uint256 confirmationPeriod
         )
     {
         PropertyListing storage listing = listings[tokenId];
@@ -448,15 +640,45 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
             listing.price,
             listing.paymentToken,
             listing.status,
-            listing.listTimestamp
+            listing.listTimestamp,
+            listing.confirmationPeriod
         );
+    }
+
+    /// @notice Get pending purchase order details
+    function getPendingPurchaseDetails(uint256 tokenId)
+        external
+        view
+        returns (
+            address buyer,
+            uint256 offerPrice,
+            address paymentToken,
+            uint256 purchaseTimestamp,
+            uint256 confirmationDeadline,
+            bool isActive,
+            bool isExpired
+        )
+    {
+        PendingPurchase storage purchase = pendingPurchases[tokenId];
+        return (
+            purchase.buyer,
+            purchase.offerPrice,
+            purchase.paymentToken,
+            purchase.purchaseTimestamp,
+            purchase.confirmationDeadline,
+            purchase.isActive,
+            block.timestamp > purchase.confirmationDeadline
+        );
+    }
+
+    /// @notice Check if property requires seller confirmation
+    function requiresSellerConfirmation(uint256 tokenId) external view returns (bool) {
+        return listings[tokenId].confirmationPeriod > 0;
     }
     
     // ========== Bidding Functions ==========
     
     // ========== Bidding Constants ==========
-    /// @notice Minimum percentage increment required for new bids
-    uint256 public constant MIN_BID_INCREMENT_PERCENT = 5;
 
     /// @notice Maximum number of bids before cleanup is triggered
     uint256 public constant MAX_BIDS_BEFORE_CLEANUP = 100;
@@ -510,7 +732,7 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
         }
         
         if (highestBid > 0) {
-            uint256 minBid = highestBid * (100 + MIN_BID_INCREMENT_PERCENT) / 100;
+            uint256 minBid = highestBid;
             require(bidAmount >= minBid, ErrorCodes.E205);
         }
         
@@ -518,7 +740,7 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
             Bid storage existingBid = bidsForToken[tokenId][existingBidIndex - 1];
             require(existingBid.isActive, ErrorCodes.E202);
             require(existingBid.paymentToken == paymentToken, ErrorCodes.E302);
-            uint256 minIncrement = existingBid.amount * (100 + MIN_BID_INCREMENT_PERCENT) / 100;
+            uint256 minIncrement = existingBid.amount ;
             require(bidAmount >= minIncrement, ErrorCodes.E205);
             existingBid.amount = bidAmount;
             existingBid.bidTimestamp = block.timestamp;

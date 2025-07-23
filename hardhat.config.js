@@ -10,13 +10,25 @@ module.exports = {
     settings: {
       optimizer: {
         enabled: true,
-        runs: 1
+        runs: 200
       }
     }
   },
   networks: {
     hardhat: {
-      chainId: 31337
+      chainId: 31337,
+      allowUnlimitedContractSize: true,
+      blockGasLimit: 30000000,
+      gas: 30000000,
+      gasPrice: 1000000000,
+      hardfork: "shanghai"
+    },
+    localhost: {
+      url: "http://127.0.0.1:8545",
+      allowUnlimitedContractSize: true,
+      blockGasLimit: 30000000,
+      gas: 30000000,
+      gasPrice: 1000000000
     }
   },
   paths: {
