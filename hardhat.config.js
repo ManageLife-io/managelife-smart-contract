@@ -10,8 +10,9 @@ module.exports = {
     settings: {
       optimizer: {
         enabled: true,
-        runs: 200
-      }
+        runs: 1 // Optimize for contract size rather than gas efficiency
+      },
+      viaIR: true // Enable intermediate representation for better optimization
     }
   },
   networks: {

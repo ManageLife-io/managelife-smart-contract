@@ -170,11 +170,11 @@ contract DynamicRewards is AccessControl, ReentrancyGuard {
         uint256 userShare = (_balances[account] * multiplier) / (_totalSupply * PRECISION_MULTIPLIER);
 
         // Final calculation with precision adjustment
-        uint256 earned = (availableRewards * userShare) / (TOKEN_UNIT * PRECISION_MULTIPLIER);
+        uint256 earnedAmount = (availableRewards * userShare) / (TOKEN_UNIT * PRECISION_MULTIPLIER);
 
         // Ensure we don't underflow
         uint256 alreadyAccrued = _userAccrued[account][scheduleId];
-        return earned > alreadyAccrued ? earned - alreadyAccrued : 0;
+        return earnedAmount > alreadyAccrued ? earnedAmount - alreadyAccrued : 0;
     }
 
     // ================== Reward Claiming ==================

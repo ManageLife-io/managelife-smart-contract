@@ -219,10 +219,9 @@ contract GnosisStyleMultiSig is ReentrancyGuard {
     }
     
     /// @notice Remove owner (requires multisig)
-    /// @param prevOwner Previous owner in linked list
     /// @param owner Owner to remove
     /// @param _threshold New threshold
-    function removeOwner(address prevOwner, address owner, uint256 _threshold) external {
+    function removeOwner(address /* prevOwner */, address owner, uint256 _threshold) external {
         if (msg.sender != address(this)) revert Unauthorized();
         if (!isOwner[owner]) revert InvalidOwner();
         if (owners.length - 1 < _threshold) revert InvalidThreshold();
