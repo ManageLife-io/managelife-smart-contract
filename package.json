@@ -12,7 +12,7 @@
     "test:rewards": "npx hardhat test tests/Rewards.test.js",
     "test:admin": "npx hardhat test tests/AdminControl.test.js",
     "test:coverage": "npx hardhat coverage",
-    "deploy:local": "npx hardhat run scripts/deploy_with_ethers.ts --network hardhat",
+    "deploy:local": "npx hardhat run hardhat_scripts/deploy_with_ethers.ts --network hardhat",
     "clean": "npx hardhat clean"
   },
   "devDependencies": {

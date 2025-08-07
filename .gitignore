@@ -1,2 +1,5 @@
 node_modules
 .DS_Store
+browser/
+# Ignore all artifact directories
+**/artifacts/

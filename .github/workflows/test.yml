@@ -1,0 +1,42 @@
+# Note: The CI workflow is not used right now because we're in the process of moving to forge from hardhat.
+# Needs to be enabled when we're ready to move to fully move to forge.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  FOUNDRY_PROFILE: ci
+
+jobs:
+  check:
+    name: Foundry project
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Show Forge version
+        run: |
+          forge --version
+
+      # - name: Run Forge fmt
+      #   run: |
+      #     forge fmt --check
+      #   id: fmt
+
+      # - name: Run Forge build
+      #   run: |
+      #     forge build --sizes
+      #   id: build
+
+      # - name: Run Forge tests
+      #   run: |
+      #     forge test -vvv
+      #   id: test
