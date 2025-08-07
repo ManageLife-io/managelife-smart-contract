@@ -400,15 +400,7 @@ contract PropertyMarket is ReentrancyGuard {
                 emit RefundQueued(bidder, amount);
             }
         } else {
-            try IERC20(paymentToken).transfer(bidder, amount) returns (bool success) {
-                if (!success) {
-                    pendingTokenRefunds[bidder][paymentToken] += amount;
-
-                }
-            } catch {
-                pendingTokenRefunds[bidder][paymentToken] += amount;
-
-            }
+            IERC20(paymentToken).safeTransfer(bidder, amount);
         }
     }
     function _validatePayment(
