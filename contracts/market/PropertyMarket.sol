@@ -3,14 +3,16 @@ pragma solidity 0.8.20;
 
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {AdminControl} from "../governance/AdminControl.sol";
 import {PropertyMarketTimelock} from "../governance/PropertyTimelock.sol";
 import {MultiSigOperator} from "../governance/MultiSigOperator.sol";
 import {PaymentProcessor} from "../libraries/PaymentProcessor.sol";
-import "../libraries/ErrorCodes.sol";
+import {ErrorCodes} from "../libraries/ErrorCodes.sol";
 
 contract PropertyMarket is ReentrancyGuard {
+    using SafeERC20 for IERC20;
     constructor(address _nfti, address _nftm, AdminControl _adminControl){
         require(_nfti != address(0), ErrorCodes.E001);
         require(_nftm != address(0), ErrorCodes.E001);
@@ -71,7 +73,6 @@ contract PropertyMarket is ReentrancyGuard {
 
     uint32 public constant PAYMENT_TIMEOUT = 24 hours;
     mapping(uint256 => uint32) public paymentDeadlines;
-    mapping(address => bool) public isDeflationaryToken;
 
     mapping(uint256 => Bid[]) public bidsForToken;
     mapping(uint256 => mapping(address => uint256)) public ethBidDeposits;
@@ -146,7 +147,6 @@ contract PropertyMarket is ReentrancyGuard {
     );
     event BidRefundFailed(uint256 indexed tokenId, address indexed bidder, uint256 amount);
     event PaymentExpired(uint256 indexed tokenId, address indexed bidder, uint256 amount);
-    event DeflationaryTokenSet(address indexed token, bool isDeflationary);
     event PurchaseRequested(
         uint256 indexed tokenId,
         address indexed buyer,
@@ -191,49 +191,7 @@ contract PropertyMarket is ReentrancyGuard {
         allowedPaymentTokens[token] = false;
         emit PaymentTokenRemoved(token);
     }
-
-    function setDeflationaryToken(address token, bool _isDeflationary) external onlyOperatorWithTimelock {
-        require(token != address(0), ErrorCodes.E001);
-        isDeflationaryToken[token] = _isDeflationary;
-        emit DeflationaryTokenSet(token, _isDeflationary);
-    }
-    function _safeTokenTransferFrom(
-        IERC20 token,
-        address from,
-        address to,
-        uint256 amount
-    ) internal returns (uint256 actualReceived) {
-        if (isDeflationaryToken[address(token)]) {
-            uint256 balanceBefore = token.balanceOf(to);
-            require(token.transferFrom(from, to, amount), ErrorCodes.E901);
-            uint256 balanceAfter = token.balanceOf(to);
-
-            actualReceived = balanceAfter - balanceBefore;
-            if (actualReceived != amount) {
-            }
-        } else {
-            require(token.transferFrom(from, to, amount), ErrorCodes.E901);
-            actualReceived = amount;
-        }
-    }
-    function _safeTokenTransfer(
-        IERC20 token,
-        address to,
-        uint256 amount
-    ) internal returns (uint256 actualSent) {
-        if (isDeflationaryToken[address(token)]) {
-            uint256 balanceBefore = token.balanceOf(address(this));
-            require(token.transfer(to, amount), ErrorCodes.E901);
-            uint256 balanceAfter = token.balanceOf(address(this));
-
-            actualSent = balanceBefore - balanceAfter;
-            if (actualSent != amount) {
-            }
-        } else {
-            require(token.transfer(to, amount), ErrorCodes.E901);
-            actualSent = amount;
-        }
-    }
+    
     function setWhitelistEnabled(bool enabled) external onlyOperatorWithTimelock {
         whitelistEnabled = enabled;
         emit WhitelistStatusChanged(enabled);
@@ -306,10 +264,8 @@ contract PropertyMarket is ReentrancyGuard {
             require(msg.value >= actualPrice, ErrorCodes.E601);
         } else {
             IERC20 token = IERC20(paymentToken);
-            uint256 actualReceived = _safeTokenTransferFrom(token, msg.sender, address(this), actualPrice);
-            if (isDeflationaryToken[paymentToken] && actualReceived < actualPrice) {
-                actualPrice = actualReceived;
-            }
+            token.safeTransferFrom(msg.sender, address(this), actualPrice);
+   
         }
         listing.status = PropertyStatus.PENDING_SELLER_CONFIRMATION;
         uint256 deadline = block.timestamp + listing.confirmationPeriod;
@@ -397,7 +353,7 @@ contract PropertyMarket is ReentrancyGuard {
             require(success, ErrorCodes.E902);
         } else {
             IERC20 token = IERC20(purchase.paymentToken);
-            _safeTokenTransfer(token, purchase.buyer, purchase.offerPrice);
+            token.safeTransfer(purchase.buyer, purchase.offerPrice);
         }
     }
 
@@ -444,15 +400,7 @@ contract PropertyMarket is ReentrancyGuard {
                 emit RefundQueued(bidder, amount);
             }
         } else {
-            try IERC20(paymentToken).transfer(bidder, amount) returns (bool success) {
-                if (!success) {
-                    pendingTokenRefunds[bidder][paymentToken] += amount;
-
-                }
-            } catch {
-                pendingTokenRefunds[bidder][paymentToken] += amount;
-
-            }
+            IERC20(paymentToken).safeTransfer(bidder, amount);
         }
     }
     function _validatePayment(
@@ -513,8 +461,8 @@ contract PropertyMarket is ReentrancyGuard {
             require(successFee, ErrorCodes.E904);
         } else {
             IERC20 token = IERC20(paymentToken);
-            _safeTokenTransfer(token, seller, netValue);
-            _safeTokenTransfer(token, feeCollector, fees);
+            token.safeTransfer(seller, netValue);
+            token.safeTransfer(feeCollector, fees);
         }
     }
     function updateListing(uint256 tokenId, uint256 newPrice, address newPaymentToken) external onlyOperatorWithTimelock {
@@ -614,10 +562,7 @@ contract PropertyMarket is ReentrancyGuard {
                 } else {
                     IERC20 token = IERC20(paymentToken);
                     require(token.allowance(msg.sender, address(this)) >= additionalAmount, ErrorCodes.E208);
-                    uint256 actualReceived = _safeTokenTransferFrom(token, msg.sender, address(this), additionalAmount);
-                    if (isDeflationaryToken[paymentToken] && actualReceived < additionalAmount) {
-                        bidAmount = existingBid.amount + actualReceived;
-                    }
+                    token.safeTransferFrom(msg.sender, address(this), additionalAmount);
                 }
             } else {
                 require(msg.value == 0, ErrorCodes.E608);
@@ -628,10 +573,7 @@ contract PropertyMarket is ReentrancyGuard {
             } else {
                 IERC20 token = IERC20(paymentToken);
                 require(token.allowance(msg.sender, address(this)) >= bidAmount, ErrorCodes.E208);
-                uint256 actualReceived = _safeTokenTransferFrom(token, msg.sender, address(this), bidAmount);
-                if (isDeflationaryToken[paymentToken] && actualReceived < bidAmount) {
-                    bidAmount = actualReceived;
-                }
+                token.safeTransferFrom(msg.sender, address(this), bidAmount);
             }
         }
 
@@ -802,7 +744,7 @@ contract PropertyMarket is ReentrancyGuard {
             require(success, ErrorCodes.E303);
         } else {
             IERC20 token = IERC20(paymentToken);
-            _safeTokenTransfer(token, msg.sender, refundAmount);
+            token.safeTransfer(msg.sender, refundAmount);
         }
 
         emit BidCancelled(tokenId, msg.sender, refundAmount);
