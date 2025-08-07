@@ -17,17 +17,14 @@ contract PropertyMarket is ReentrancyGuard {
         require(_nfti != address(0), ErrorCodes.E001);
         require(_nftm != address(0), ErrorCodes.E001);
 
-        allowedPaymentTokens[address(0)] = true;
         nftiContract = IERC721(_nfti);
         nftmContract = IERC721(_nftm);
         adminControl = _adminControl;
     }
 
-    receive() external payable {}
-
     uint256 public constant PERCENTAGE_BASE = 10000;
 
-    enum PropertyStatus { LISTED, RENTED, SOLD, DELISTED, PENDING_PAYMENT, PENDING_SELLER_CONFIRMATION }
+    enum PropertyStatus { LISTED, RENTED, SOLD, DELISTED, PENDING_SELLER_CONFIRMATION }
 
     struct Bid {
         uint256 tokenId;
@@ -72,13 +69,9 @@ contract PropertyMarket is ReentrancyGuard {
     mapping(uint256 => PendingPurchase) public pendingPurchases;
 
     uint32 public constant PAYMENT_TIMEOUT = 24 hours;
-    mapping(uint256 => uint32) public paymentDeadlines;
 
     mapping(uint256 => Bid[]) public bidsForToken;
-    mapping(uint256 => mapping(address => uint256)) public ethBidDeposits;
     mapping(address => mapping(uint256 => uint256)) public bidIndexByBidder;
-    mapping(address => uint256) public pendingRefunds;
-    mapping(address => mapping(address => uint256)) public pendingTokenRefunds;
     event NewListing(
         uint256 indexed tokenId,
         address indexed seller,
@@ -113,14 +106,6 @@ contract PropertyMarket is ReentrancyGuard {
         address paymentToken
     );
 
-    event BidAcceptedPendingPayment(
-        uint256 indexed tokenId,
-        address indexed seller,
-        address indexed bidder,
-        uint256 amount,
-        address paymentToken
-    );
-
     event BidCancelled(
         uint256 indexed tokenId,
         address indexed bidder,
@@ -136,8 +121,6 @@ contract PropertyMarket is ReentrancyGuard {
     event TimelockSet(address indexed timelock);
     event MultiSigOperatorSet(address indexed multiSigOperator);
     event TimelockEnabledChanged(bool enabled);
-    event RefundQueued(address indexed user, uint256 amount);
-    event RefundWithdrawn(address indexed user, uint256 amount);
     event CompetitivePurchase(
         uint256 indexed tokenId,
         address indexed buyer,
@@ -146,7 +129,6 @@ contract PropertyMarket is ReentrancyGuard {
         address paymentToken
     );
     event BidRefundFailed(uint256 indexed tokenId, address indexed bidder, uint256 amount);
-    event PaymentExpired(uint256 indexed tokenId, address indexed bidder, uint256 amount);
     event PurchaseRequested(
         uint256 indexed tokenId,
         address indexed buyer,
@@ -177,6 +159,10 @@ contract PropertyMarket is ReentrancyGuard {
         uint256 offerPrice,
         address paymentToken
     );
+
+
+    error DirectEthTransferNotAllowed();
+
     function isTokenAllowed(address token) internal view returns (bool) {
         if (!whitelistEnabled) return true;
         return allowedPaymentTokens[token];
@@ -246,7 +232,7 @@ contract PropertyMarket is ReentrancyGuard {
 
         emit NewListing(tokenId, msg.sender, price, paymentToken);
     }
-    function purchaseProperty(uint256 tokenId, uint256 offerPrice) external payable nonReentrant onlyKYCVerified onlyValidAmount(offerPrice) {
+    function purchaseProperty(uint256 tokenId, uint256 offerPrice) external nonReentrant onlyKYCVerified onlyValidAmount(offerPrice) {
         PropertyListing storage listing = listings[tokenId];
         require(listing.status == PropertyStatus.LISTED, ErrorCodes.E101);
         require(_validatePayment(listing.price, offerPrice, listing.paymentToken, tokenId), ErrorCodes.E005);
@@ -260,13 +246,8 @@ contract PropertyMarket is ReentrancyGuard {
     }
     function _createPendingPurchase(uint256 tokenId, uint256 actualPrice, address paymentToken) internal {
         PropertyListing storage listing = listings[tokenId];
-        if (paymentToken == address(0)) {
-            require(msg.value >= actualPrice, ErrorCodes.E601);
-        } else {
-            IERC20 token = IERC20(paymentToken);
-            token.safeTransferFrom(msg.sender, address(this), actualPrice);
-   
-        }
+        IERC20 token = IERC20(paymentToken);
+        token.safeTransferFrom(msg.sender, address(this), actualPrice);
         listing.status = PropertyStatus.PENDING_SELLER_CONFIRMATION;
         uint256 deadline = block.timestamp + listing.confirmationPeriod;
 
@@ -347,14 +328,8 @@ contract PropertyMarket is ReentrancyGuard {
     }
     function _refundPendingPurchase(uint256 tokenId) internal {
         PendingPurchase storage purchase = pendingPurchases[tokenId];
-
-        if (purchase.paymentToken == address(0)) {
-            (bool success, ) = payable(purchase.buyer).call{value: purchase.offerPrice}("");
-            require(success, ErrorCodes.E902);
-        } else {
-            IERC20 token = IERC20(purchase.paymentToken);
-            token.safeTransfer(purchase.buyer, purchase.offerPrice);
-        }
+        IERC20 token = IERC20(purchase.paymentToken);
+        token.safeTransfer(purchase.buyer, purchase.offerPrice);
     }
 
     function _cancelAllBids(uint256 tokenId) private {
@@ -392,16 +367,7 @@ contract PropertyMarket is ReentrancyGuard {
     }
 
     function _refundBid(address bidder, uint256 amount, address paymentToken, uint256) private {
-        if (paymentToken == address(0)) {
-            (bool success, ) = payable(bidder).call{value: amount, gas: 10000}("");
-            if (!success) {
-                pendingRefunds[bidder] += amount;
-
-                emit RefundQueued(bidder, amount);
-            }
-        } else {
-            IERC20(paymentToken).safeTransfer(bidder, amount);
-        }
+        IERC20(paymentToken).safeTransfer(bidder, amount);
     }
     function _validatePayment(
         uint256 listedPrice,
@@ -414,12 +380,7 @@ contract PropertyMarket is ReentrancyGuard {
         }
         uint256 highestBid = _getHighestActiveBid(tokenId);
         uint256 minimumPrice = highestBid > 0 ? highestBid : listedPrice;
-
-        if (paymentToken == address(0)) {
-            return msg.value >= minimumPrice && offerPrice >= minimumPrice && msg.value == offerPrice;
-        } else {
-            return offerPrice >= minimumPrice;
-        }
+        return offerPrice >= minimumPrice;
     }
 
     function _processPayment(
@@ -454,16 +415,10 @@ contract PropertyMarket is ReentrancyGuard {
         uint256 fees = (amount * baseFee) / PERCENTAGE_BASE;
         uint256 netValue = amount - fees;
 
-        if (paymentToken == address(0)) {
-            (bool successSeller, ) = payable(seller).call{value: netValue}("");
-            require(successSeller, ErrorCodes.E903);
-            (bool successFee, ) = payable(feeCollector).call{value: fees}("");
-            require(successFee, ErrorCodes.E904);
-        } else {
-            IERC20 token = IERC20(paymentToken);
-            token.safeTransfer(seller, netValue);
-            token.safeTransfer(feeCollector, fees);
-        }
+        IERC20 token = IERC20(paymentToken);
+        token.safeTransfer(seller, netValue);
+        token.safeTransfer(feeCollector, fees);
+        
     }
     function updateListing(uint256 tokenId, uint256 newPrice, address newPaymentToken) external onlyOperatorWithTimelock {
         PropertyListing storage listing = listings[tokenId];
@@ -540,7 +495,7 @@ contract PropertyMarket is ReentrancyGuard {
         );
     }
 
-    function placeBid(uint256 tokenId, uint256 bidAmount, address paymentToken) external payable nonReentrant onlyKYCVerified onlyAllowedToken(paymentToken) onlyValidAmount(bidAmount) {
+    function placeBid(uint256 tokenId, uint256 bidAmount, address paymentToken) external nonReentrant onlyKYCVerified onlyAllowedToken(paymentToken) onlyValidAmount(bidAmount) {
         PropertyListing storage listing = listings[tokenId];
         require(listing.status == PropertyStatus.LISTED, ErrorCodes.E103);
 
@@ -553,28 +508,16 @@ contract PropertyMarket is ReentrancyGuard {
             require(existingBid.paymentToken == paymentToken, ErrorCodes.E302);
 
             uint256 oldAmount = existingBid.amount;
-            require(bidAmount >= oldAmount, ErrorCodes.E205);
+            require(bidAmount > oldAmount, ErrorCodes.E205);
+            uint256 additionalAmount = bidAmount - oldAmount;
+            IERC20 token = IERC20(paymentToken);
+            require(token.allowance(msg.sender, address(this)) >= additionalAmount, ErrorCodes.E208);
+            token.safeTransferFrom(msg.sender, address(this), additionalAmount);
 
-            if (bidAmount > oldAmount) {
-                uint256 additionalAmount = bidAmount - oldAmount;
-                if (paymentToken == address(0)) {
-                    require(msg.value == additionalAmount, ErrorCodes.E706);
-                } else {
-                    IERC20 token = IERC20(paymentToken);
-                    require(token.allowance(msg.sender, address(this)) >= additionalAmount, ErrorCodes.E208);
-                    token.safeTransferFrom(msg.sender, address(this), additionalAmount);
-                }
-            } else {
-                require(msg.value == 0, ErrorCodes.E608);
-            }
         } else {
-            if (paymentToken == address(0)) {
-                require(msg.value == bidAmount, ErrorCodes.E207);
-            } else {
-                IERC20 token = IERC20(paymentToken);
-                require(token.allowance(msg.sender, address(this)) >= bidAmount, ErrorCodes.E208);
-                token.safeTransferFrom(msg.sender, address(this), bidAmount);
-            }
+            IERC20 token = IERC20(paymentToken);
+            require(token.allowance(msg.sender, address(this)) >= bidAmount, ErrorCodes.E208);
+            token.safeTransferFrom(msg.sender, address(this), bidAmount);
         }
 
         require(bidAmount >= listing.price, ErrorCodes.E206);
@@ -631,49 +574,15 @@ contract PropertyMarket is ReentrancyGuard {
         require(bid.amount == expectedAmount, ErrorCodes.E501);
         require(bid.paymentToken == expectedPaymentToken, ErrorCodes.E302);
 
-        if (bid.paymentToken == address(0)) {
-            listing.status = PropertyStatus.PENDING_PAYMENT;
-            uint32 deadline = uint32(block.timestamp + PAYMENT_TIMEOUT);
-            paymentDeadlines[tokenId] = deadline;
 
-            emit BidAcceptedPendingPayment(tokenId, listing.seller, bid.bidder, bid.amount, bid.paymentToken);
-        } else {
-            listing.status = PropertyStatus.SOLD;
-            bid.isActive = false;
-            bidIndexByBidder[bid.bidder][tokenId] = 0;
-            _processPaymentFromBalance(listing.seller, bid.amount, bid.paymentToken);
-            nftiContract.safeTransferFrom(listing.seller, bid.bidder, tokenId, "");
-            emit BidAccepted(tokenId, listing.seller, bid.bidder, bid.amount, bid.paymentToken);
-        }
-        _cancelOtherBids(tokenId, bid.bidder);
-    }
-
-    function completeBidPayment(uint256 tokenId) external payable nonReentrant {
-        PropertyListing storage listing = listings[tokenId];
-        require(listing.status == PropertyStatus.PENDING_PAYMENT, ErrorCodes.E504);
-        require(block.timestamp <= paymentDeadlines[tokenId], ErrorCodes.E906);
-        uint256 bidIndex = bidIndexByBidder[msg.sender][tokenId];
-        require(bidIndex > 0, ErrorCodes.E907);
-
-        Bid storage bid = bidsForToken[tokenId][bidIndex - 1];
-        require(bid.isActive, ErrorCodes.E908);
-        require(bid.bidder == msg.sender, ErrorCodes.E909);
-        require(bid.paymentToken == address(0), ErrorCodes.E910);
-        require(msg.value == 0, ErrorCodes.E608);
         listing.status = PropertyStatus.SOLD;
         bid.isActive = false;
-        bidIndexByBidder[msg.sender][tokenId] = 0;
-        delete paymentDeadlines[tokenId];
-        (uint256 baseFee,, address feeCollector) = adminControl.feeConfig();
-        uint256 fees = (bid.amount * baseFee) / PERCENTAGE_BASE;
-        uint256 netValue = bid.amount - fees;
-        (bool successSeller, ) = payable(listing.seller).call{value: netValue}("");
-        require(successSeller, ErrorCodes.E609);
-        (bool successFee, ) = payable(feeCollector).call{value: fees}("");
-        require(successFee, ErrorCodes.E610);
-        nftiContract.safeTransferFrom(listing.seller, msg.sender, tokenId, "");
-
-        emit BidAccepted(tokenId, listing.seller, msg.sender, bid.amount, bid.paymentToken);
+        bidIndexByBidder[bid.bidder][tokenId] = 0;
+        _processPaymentFromBalance(listing.seller, bid.amount, bid.paymentToken);
+        nftiContract.safeTransferFrom(listing.seller, bid.bidder, tokenId, "");
+        emit BidAccepted(tokenId, listing.seller, bid.bidder, bid.amount, bid.paymentToken);
+        
+        _cancelOtherBids(tokenId, bid.bidder);
     }
 
     function _calculateMinimumIncrement(uint256 currentHighest, uint256 /* newBid */) private pure returns (uint256) {
@@ -739,66 +648,9 @@ contract PropertyMarket is ReentrancyGuard {
 
         bid.isActive = false;
         bidIndexByBidder[msg.sender][tokenId] = 0;
-        if (paymentToken == address(0)) {
-            (bool success, ) = payable(msg.sender).call{value: refundAmount}("");
-            require(success, ErrorCodes.E303);
-        } else {
-            IERC20 token = IERC20(paymentToken);
-            token.safeTransfer(msg.sender, refundAmount);
-        }
-
+        IERC20 token = IERC20(paymentToken);
+        token.safeTransfer(msg.sender, refundAmount);
         emit BidCancelled(tokenId, msg.sender, refundAmount);
-    }
-
-    function withdrawPendingRefund() external nonReentrant {
-        uint256 refundAmount = pendingRefunds[msg.sender];
-        require(refundAmount > 0, ErrorCodes.E704);
-
-        pendingRefunds[msg.sender] = 0;
-
-        (bool success, ) = payable(msg.sender).call{value: refundAmount}("");
-        require(success, ErrorCodes.E705);
-
-        emit RefundWithdrawn(msg.sender, refundAmount);
-    }
-
-    function cancelExpiredPayment(uint256 tokenId) external nonReentrant {
-        PropertyListing storage listing = listings[tokenId];
-        require(listing.status == PropertyStatus.PENDING_PAYMENT, ErrorCodes.E702);
-        require(block.timestamp > paymentDeadlines[tokenId], ErrorCodes.E703);
-        uint256 bidIndex = 0;
-        address bidder = address(0);
-        uint256 bidAmount = 0;
-
-        Bid[] storage bids = bidsForToken[tokenId];
-        for (uint256 i = 0; i < bids.length; i++) {
-            if (bids[i].isActive && bids[i].paymentToken == address(0)) {
-                bidIndex = i;
-                bidder = bids[i].bidder;
-                bidAmount = bids[i].amount;
-                break;
-            }
-        }
-
-        require(bidder != address(0), ErrorCodes.E701);
-        bids[bidIndex].isActive = false;
-        bidIndexByBidder[bidder][tokenId] = 0;
-        listing.status = PropertyStatus.LISTED;
-        delete paymentDeadlines[tokenId];
-        _refundBid(bidder, bidAmount, address(0), tokenId);
-
-        emit PaymentExpired(tokenId, bidder, bidAmount);
-    }
-
-
-    function emergencyWithdrawETH(uint256 amount, address payable recipient) onlyAdminControlAdmin() external {
-        require(recipient != address(0), ErrorCodes.E913);
-        require(amount <= address(this).balance, ErrorCodes.E914);
-
-        (bool success, ) = recipient.call{value: amount}("");
-        require(success, ErrorCodes.E905);
-
-        emit EmergencyWithdrawal(recipient, amount);
     }
 
     function emergencyWithdrawToken(address token, uint256 amount, address recipient) onlyAdminControlAdmin() external {
@@ -808,10 +660,14 @@ contract PropertyMarket is ReentrancyGuard {
         IERC20 tokenContract = IERC20(token);
         require(amount <= tokenContract.balanceOf(address(this)), ErrorCodes.E916);
 
-        bool success = tokenContract.transfer(recipient, amount);
-        require(success, ErrorCodes.E901);
+        tokenContract.safeTransfer(recipient, amount);
 
         emit EmergencyTokenWithdrawal(token, recipient, amount);
+    }
+
+    //We don't want to allow direct eth transfers to the contract
+    receive() external payable {
+        revert DirectEthTransferNotAllowed();
     }
 
 }
