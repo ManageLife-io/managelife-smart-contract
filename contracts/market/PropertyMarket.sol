@@ -1,23 +1,24 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.20;
 
-import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "../governance/AdminControl.sol";
-import "../governance/PropertyTimelock.sol";
-import "../governance/MultiSigOperator.sol";
-import "../libraries/PaymentProcessor.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {AdminControl} from "../governance/AdminControl.sol";
+import {PropertyMarketTimelock} from "../governance/PropertyTimelock.sol";
+import {MultiSigOperator} from "../governance/MultiSigOperator.sol";
+import {PaymentProcessor} from "../libraries/PaymentProcessor.sol";
 import "../libraries/ErrorCodes.sol";
 
-contract PropertyMarket is ReentrancyGuard, AdminControl {
-    constructor(address _nfti, address _nftm, address admin, address fee, address vault) AdminControl(admin, fee, vault) {
+contract PropertyMarket is ReentrancyGuard {
+    constructor(address _nfti, address _nftm, AdminControl _adminControl){
         require(_nfti != address(0), ErrorCodes.E001);
         require(_nftm != address(0), ErrorCodes.E001);
 
         allowedPaymentTokens[address(0)] = true;
         nftiContract = IERC721(_nfti);
         nftmContract = IERC721(_nftm);
+        adminControl = _adminControl;
     }
 
     receive() external payable {}
@@ -63,6 +64,7 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
     bool public timelockEnabled = true;
     mapping(address => bool) public allowedPaymentTokens;
     bool public whitelistEnabled = true;
+    AdminControl public adminControl;
 
     mapping(uint256 => PropertyListing) public listings;
     mapping(uint256 => PendingPurchase) public pendingPurchases;
@@ -236,19 +238,19 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
         whitelistEnabled = enabled;
         emit WhitelistStatusChanged(enabled);
     }
-    function setTimelock(address t) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setTimelock(address t) external onlyAdminControlAdmin() {
         require(t != address(0), ErrorCodes.E603);
         require(address(timelock) == address(0), ErrorCodes.E601);
         timelock = PropertyMarketTimelock(payable(t));
         emit TimelockSet(t);
     }
-    function setMultiSigOperator(address m) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setMultiSigOperator(address m) external onlyAdminControlAdmin() {
         require(m != address(0), ErrorCodes.E604);
         require(address(multiSigOperator) == address(0), ErrorCodes.E602);
         multiSigOperator = MultiSigOperator(m);
         emit MultiSigOperatorSet(m);
     }
-    function setTimelockEnabled(bool enabled) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setTimelockEnabled(bool enabled) external onlyAdminControlAdmin() {
         timelockEnabled = enabled;
         emit TimelockEnabledChanged(enabled);
     }
@@ -478,9 +480,10 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
         uint256 amount,
         address paymentToken
     ) internal {
+        (uint256 baseFee,, address feeCollector) = adminControl.feeConfig();
         PaymentProcessor.PaymentConfig memory config = PaymentProcessor.PaymentConfig({
-            baseFee: feeConfig.baseFee,
-            feeCollector: feeConfig.feeCollector,
+            baseFee: baseFee,
+            feeCollector: feeCollector,
             percentageBase: PERCENTAGE_BASE
         });
 
@@ -498,18 +501,20 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
         uint256 amount,
         address paymentToken
     ) internal {
-        uint256 fees = (amount * feeConfig.baseFee) / PERCENTAGE_BASE;
+        (uint256 baseFee,, address feeCollector) = adminControl.feeConfig();
+
+        uint256 fees = (amount * baseFee) / PERCENTAGE_BASE;
         uint256 netValue = amount - fees;
 
         if (paymentToken == address(0)) {
             (bool successSeller, ) = payable(seller).call{value: netValue}("");
             require(successSeller, ErrorCodes.E903);
-            (bool successFee, ) = payable(feeConfig.feeCollector).call{value: fees}("");
+            (bool successFee, ) = payable(feeCollector).call{value: fees}("");
             require(successFee, ErrorCodes.E904);
         } else {
             IERC20 token = IERC20(paymentToken);
             _safeTokenTransfer(token, seller, netValue);
-            _safeTokenTransfer(token, feeConfig.feeCollector, fees);
+            _safeTokenTransfer(token, feeCollector, fees);
         }
     }
     function updateListing(uint256 tokenId, uint256 newPrice, address newPaymentToken) external onlyOperatorWithTimelock {
@@ -524,8 +529,15 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
 
         emit ListingUpdated(tokenId, newPrice, newPaymentToken);
     }
-    modifier onlyOperator() {
-        require(hasRole(OPERATOR_ROLE, msg.sender), ErrorCodes.E402);
+
+
+    modifier onlyAdminControlAdmin(){
+        require(adminControl.hasRole(adminControl.DEFAULT_ADMIN_ROLE(), msg.sender), ErrorCodes.E401);
+        _;
+    }
+
+    modifier onlyAdminControlOperator() {
+        require(adminControl.hasRole(adminControl.OPERATOR_ROLE(), msg.sender), ErrorCodes.E402);
         _;
     }
 
@@ -537,13 +549,13 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
         if (timelockEnabled && address(timelock) != address(0)) {
             require(msg.sender == address(timelock), ErrorCodes.E601);
         } else {
-            require(hasRole(OPERATOR_ROLE, msg.sender), ErrorCodes.E402);
+            require(adminControl.hasRole(adminControl.OPERATOR_ROLE(), msg.sender), ErrorCodes.E402);
         }
         _;
     }
 
     modifier onlyKYCVerified() {
-        require(this.isKYCVerified(msg.sender), ErrorCodes.E403);
+        require(adminControl.isKYCVerified(msg.sender), ErrorCodes.E403);
         _;
     }
 
@@ -710,11 +722,12 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
         bid.isActive = false;
         bidIndexByBidder[msg.sender][tokenId] = 0;
         delete paymentDeadlines[tokenId];
-        uint256 fees = (bid.amount * feeConfig.baseFee) / PERCENTAGE_BASE;
+        (uint256 baseFee,, address feeCollector) = adminControl.feeConfig();
+        uint256 fees = (bid.amount * baseFee) / PERCENTAGE_BASE;
         uint256 netValue = bid.amount - fees;
         (bool successSeller, ) = payable(listing.seller).call{value: netValue}("");
         require(successSeller, ErrorCodes.E609);
-        (bool successFee, ) = payable(feeConfig.feeCollector).call{value: fees}("");
+        (bool successFee, ) = payable(feeCollector).call{value: fees}("");
         require(successFee, ErrorCodes.E610);
         nftiContract.safeTransferFrom(listing.seller, msg.sender, tokenId, "");
 
@@ -836,8 +849,7 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
     }
 
 
-    function emergencyWithdrawETH(uint256 amount, address payable recipient) external {
-        require(hasRole(DEFAULT_ADMIN_ROLE, msg.sender), ErrorCodes.E912);
+    function emergencyWithdrawETH(uint256 amount, address payable recipient) onlyAdminControlAdmin() external {
         require(recipient != address(0), ErrorCodes.E913);
         require(amount <= address(this).balance, ErrorCodes.E914);
 
@@ -847,8 +859,7 @@ contract PropertyMarket is ReentrancyGuard, AdminControl {
         emit EmergencyWithdrawal(recipient, amount);
     }
 
-    function emergencyWithdrawToken(address token, uint256 amount, address recipient) external {
-        require(hasRole(DEFAULT_ADMIN_ROLE, msg.sender), ErrorCodes.E912);
+    function emergencyWithdrawToken(address token, uint256 amount, address recipient) onlyAdminControlAdmin() external {
         require(token != address(0), ErrorCodes.E915);
         require(recipient != address(0), ErrorCodes.E913);
 
