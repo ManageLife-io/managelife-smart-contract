@@ -62,13 +62,10 @@ contract PropertyMarket is ReentrancyGuard {
     MultiSigOperator public multiSigOperator;
     bool public timelockEnabled = true;
     mapping(address => bool) public allowedPaymentTokens;
-    bool public whitelistEnabled = true;
     AdminControl public adminControl;
 
     mapping(uint256 => PropertyListing) public listings;
     mapping(uint256 => PendingPurchase) public pendingPurchases;
-
-    uint32 public constant PAYMENT_TIMEOUT = 24 hours;
 
     mapping(uint256 => Bid[]) public bidsForToken;
     mapping(address => mapping(uint256 => uint256)) public bidIndexByBidder;
@@ -113,10 +110,8 @@ contract PropertyMarket is ReentrancyGuard {
     );
     event PaymentTokenAdded(address indexed token);
     event PaymentTokenRemoved(address indexed token);
-    event WhitelistStatusChanged(bool enabled);
     event ListingPriceChanged(uint256 indexed tokenId, uint256 newPrice);
 
-    event EmergencyWithdrawal(address indexed recipient, uint256 amount);
     event EmergencyTokenWithdrawal(address indexed token, address indexed recipient, uint256 amount);
     event TimelockSet(address indexed timelock);
     event MultiSigOperatorSet(address indexed multiSigOperator);
@@ -128,7 +123,6 @@ contract PropertyMarket is ReentrancyGuard {
         uint256 highestBidOutbid,
         address paymentToken
     );
-    event BidRefundFailed(uint256 indexed tokenId, address indexed bidder, uint256 amount);
     event PurchaseRequested(
         uint256 indexed tokenId,
         address indexed buyer,
@@ -164,7 +158,6 @@ contract PropertyMarket is ReentrancyGuard {
     error DirectEthTransferNotAllowed();
 
     function isTokenAllowed(address token) internal view returns (bool) {
-        if (!whitelistEnabled) return true;
         return allowedPaymentTokens[token];
     }
     function addAllowedToken(address token) external onlyOperatorWithTimelock {
@@ -178,10 +171,6 @@ contract PropertyMarket is ReentrancyGuard {
         emit PaymentTokenRemoved(token);
     }
     
-    function setWhitelistEnabled(bool enabled) external onlyOperatorWithTimelock {
-        whitelistEnabled = enabled;
-        emit WhitelistStatusChanged(enabled);
-    }
     function setTimelock(address t) external onlyAdminControlAdmin() {
         require(t != address(0), ErrorCodes.E603);
         require(address(timelock) == address(0), ErrorCodes.E601);

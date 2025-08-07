@@ -69,25 +69,4 @@ library PaymentProcessor {
 
     }
     
-    /// @notice Validates payment parameters
-    /// @dev Checks if payment amount and token are valid
-    /// @param listedPrice Expected payment amount
-    /// @param offerPrice Offered payment amount
-    /// @param paymentToken Token address for payment
-    /// @param allowedTokens Mapping of allowed payment tokens
-    /// @param whitelistEnabled Whether token whitelist is enabled
-    /// @return bool True if payment is valid
-    function validatePayment(
-        uint256 listedPrice,
-        uint256 offerPrice,
-        address paymentToken,
-        mapping(address => bool) storage allowedTokens,
-        bool whitelistEnabled
-    ) internal view returns (bool) {
-        // Validate that the payment token is allowed
-        if (whitelistEnabled && !allowedTokens[paymentToken]) {
-            return false;
-        }
-        return offerPrice == listedPrice;
-    }
 }
