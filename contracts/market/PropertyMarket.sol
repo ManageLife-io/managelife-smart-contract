@@ -6,8 +6,6 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {AdminControl} from "../governance/AdminControl.sol";
-import {PropertyMarketTimelock} from "../governance/PropertyTimelock.sol";
-import {MultiSigOperator} from "../governance/MultiSigOperator.sol";
 import {PaymentProcessor} from "../libraries/PaymentProcessor.sol";
 import {ErrorCodes} from "../libraries/ErrorCodes.sol";
 
@@ -24,7 +22,7 @@ contract PropertyMarket is ReentrancyGuard {
 
     uint256 public constant PERCENTAGE_BASE = 10000;
 
-    enum PropertyStatus { LISTED, RENTED, SOLD, DELISTED, PENDING_SELLER_CONFIRMATION }
+    enum PropertyStatus { LISTED, SOLD, DELISTED, PENDING_SELLER_CONFIRMATION }
 
     struct Bid {
         uint256 tokenId;
@@ -58,9 +56,6 @@ contract PropertyMarket is ReentrancyGuard {
 
     IERC721 public immutable nftiContract;
     IERC721 public immutable nftmContract;
-    PropertyMarketTimelock public timelock;
-    MultiSigOperator public multiSigOperator;
-    bool public timelockEnabled = true;
     mapping(address => bool) public allowedPaymentTokens;
     AdminControl public adminControl;
 
@@ -113,9 +108,6 @@ contract PropertyMarket is ReentrancyGuard {
     event ListingPriceChanged(uint256 indexed tokenId, uint256 newPrice);
 
     event EmergencyTokenWithdrawal(address indexed token, address indexed recipient, uint256 amount);
-    event TimelockSet(address indexed timelock);
-    event MultiSigOperatorSet(address indexed multiSigOperator);
-    event TimelockEnabledChanged(bool enabled);
     event CompetitivePurchase(
         uint256 indexed tokenId,
         address indexed buyer,
@@ -160,33 +152,17 @@ contract PropertyMarket is ReentrancyGuard {
     function isTokenAllowed(address token) internal view returns (bool) {
         return allowedPaymentTokens[token];
     }
-    function addAllowedToken(address token) external onlyOperatorWithTimelock {
+    function addAllowedToken(address token) external onlyAdminControlOperator {
         require(token != address(0), ErrorCodes.E001);
         allowedPaymentTokens[token] = true;
         emit PaymentTokenAdded(token);
     }
-    function removeAllowedToken(address token) external onlyOperatorWithTimelock {
+    function removeAllowedToken(address token) external onlyAdminControlOperator {
         require(token != address(0), ErrorCodes.E001);
         allowedPaymentTokens[token] = false;
         emit PaymentTokenRemoved(token);
     }
     
-    function setTimelock(address t) external onlyAdminControlAdmin() {
-        require(t != address(0), ErrorCodes.E603);
-        require(address(timelock) == address(0), ErrorCodes.E601);
-        timelock = PropertyMarketTimelock(payable(t));
-        emit TimelockSet(t);
-    }
-    function setMultiSigOperator(address m) external onlyAdminControlAdmin() {
-        require(m != address(0), ErrorCodes.E604);
-        require(address(multiSigOperator) == address(0), ErrorCodes.E602);
-        multiSigOperator = MultiSigOperator(m);
-        emit MultiSigOperatorSet(m);
-    }
-    function setTimelockEnabled(bool enabled) external onlyAdminControlAdmin() {
-        timelockEnabled = enabled;
-        emit TimelockEnabledChanged(enabled);
-    }
     function listProperty(uint256 tokenId, uint256 price, address paymentToken) external nonReentrant onlyKYCVerified onlyAllowedToken(paymentToken) onlyValidAmount(price) {
         _listPropertyWithConfirmation(tokenId, price, paymentToken, 0);
     }
@@ -409,7 +385,7 @@ contract PropertyMarket is ReentrancyGuard {
         token.safeTransfer(feeCollector, fees);
         
     }
-    function updateListing(uint256 tokenId, uint256 newPrice, address newPaymentToken) external onlyOperatorWithTimelock {
+    function updateListing(uint256 tokenId, uint256 newPrice, address newPaymentToken) external onlyAdminControlOperator {
         PropertyListing storage listing = listings[tokenId];
         require(listing.status == PropertyStatus.LISTED, ErrorCodes.E103);
         require(newPrice > 0, ErrorCodes.E104);
@@ -435,14 +411,6 @@ contract PropertyMarket is ReentrancyGuard {
 
     modifier onlyTokenOwner(uint256 tokenId) {
         require(nftiContract.ownerOf(tokenId) == msg.sender, ErrorCodes.E002);
-        _;
-    }
-    modifier onlyOperatorWithTimelock() {
-        if (timelockEnabled && address(timelock) != address(0)) {
-            require(msg.sender == address(timelock), ErrorCodes.E601);
-        } else {
-            require(adminControl.hasRole(adminControl.OPERATOR_ROLE(), msg.sender), ErrorCodes.E402);
-        }
         _;
     }
 
