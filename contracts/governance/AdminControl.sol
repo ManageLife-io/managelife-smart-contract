@@ -15,9 +15,10 @@ contract AdminControl is AccessControl, Pausable {
     using EnumerableSet for EnumerableSet.AddressSet;
     
     // ========== Role Definitions ==========
-    bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
-    bytes32 public constant LEGAL_ROLE = keccak256("LEGAL_ROLE");
-    bytes32 public constant REWARD_MANAGER = keccak256("REWARD_MANAGER");
+    bytes32 public constant PROTOCOL_PARAM_MANAGER_ROLE = keccak256("PROTOCOL_PARAM_MANAGER_ROLE");
+    bytes32 public constant KYC_ROLE = keccak256("KYC_ROLE");
+    bytes32 public constant REWARD_MANAGER_ROLE = keccak256("REWARD_MANAGER_ROLE");
+    bytes32 public constant NFT_PROPERTY_MANAGER_ROLE = keccak256("NFT_PROPERTY_MANAGER_ROLE");
 
     // ========== Constants ==========
     uint256 public constant BASIS_POINTS = 10000; // Base for percentage calculations (100% = 10000, 1% = 100)
@@ -51,22 +52,13 @@ contract AdminControl is AccessControl, Pausable {
     event KYCStatusUpdated(address indexed account, bool approved);
     event CommunityScoreUpdated(address indexed user, uint256 oldScore, uint256 newScore);
 
-    // ========== Role Management ==========
-    function grantRole(bytes32 role, address account) public override(AccessControl) onlyRole(getRoleAdmin(role)) {
-        super.grantRole(role, account);
-        emit AdminRoleGranted(role, account, msg.sender);
-    }
-
-    function revokeRole(bytes32 role, address account) public override(AccessControl) onlyRole(getRoleAdmin(role)) {
-        super.revokeRole(role, account);
-        emit AdminRoleRevoked(role, account, msg.sender);
-    }
 
     function _initializeRoles(address admin) internal {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
-        _grantRole(OPERATOR_ROLE, admin);
-        _grantRole(LEGAL_ROLE, admin);
-        _grantRole(REWARD_MANAGER, admin);
+        _grantRole(PROTOCOL_PARAM_MANAGER_ROLE, admin);
+        _grantRole(KYC_ROLE, admin);
+        _grantRole(REWARD_MANAGER_ROLE, admin);
+        _grantRole(NFT_PROPERTY_MANAGER_ROLE, admin);
     }
 
     constructor(
@@ -105,7 +97,7 @@ contract AdminControl is AccessControl, Pausable {
     function updateFeeConfig(
         uint256 newBaseFee, 
         address newCollector
-    ) external onlyRole(OPERATOR_ROLE) {
+    ) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) {
         require(newCollector != address(0), "Invalid fee collector address");
         require(newBaseFee <= feeConfig.maxFee, "Exceeds max fee");
         
@@ -126,7 +118,7 @@ contract AdminControl is AccessControl, Pausable {
     function batchApproveKYC(
         address[] calldata accounts, 
         bool approved
-    ) external onlyRole(LEGAL_ROLE) {
+    ) external onlyRole(KYC_ROLE) {
         uint256 length = accounts.length;
         for(uint256 i = 0; i < length;) {
             address account = accounts[i];
@@ -150,7 +142,7 @@ contract AdminControl is AccessControl, Pausable {
         uint256 newBaseRate,
         uint256 newMultiplier,
         uint256 newLeaseBonus
-    ) external onlyRole(REWARD_MANAGER) {
+    ) external onlyRole(REWARD_MANAGER_ROLE) {
         require(rewardParams.rewardsVault != address(0), "Rewards vault not set");
         require(newBaseRate <= 2000, "Base rate >20%");
         require(newMultiplier <= 2000, "Multiplier >20%");
@@ -200,7 +192,7 @@ contract AdminControl is AccessControl, Pausable {
         address user, 
         uint256 scoreDelta, 
         bool isAddition
-    ) external onlyRole(OPERATOR_ROLE) {
+    ) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) {
         uint256 oldScore = communityScores[user];
         uint256 newScore;
         
