@@ -5,9 +5,9 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
  * @title PropertyAuction
@@ -103,6 +103,8 @@ contract PropertyAuction is
     mapping(uint256 => Auction) public auctions;
     uint256 public auctionCount;
 
+    constructor() Ownable(msg.sender) {}
+
     /* -------------------------------------------------------------------------- */
     /*                                    EVENTS                                  */
     /* -------------------------------------------------------------------------- */
@@ -187,20 +189,15 @@ contract PropertyAuction is
 
         unchecked { auctionId = ++auctionCount; }
 
-        auctions[auctionId] = Auction({
-            seller: msg.sender,
-            nft: nft,
-            tokenId: tokenId,
-            payToken: payToken,
-            minBid: minBid,
-            buyNowPrice: buyNowPrice,
-            biddingEnd: uint64(block.timestamp) + duration,
-            highestBidder: address(0),
-            highestBid: 0,
-            nftDeposited: false,
-            fundsDeposited: false,
-            status: AuctionStatus.Active
-        });
+        Auction storage a = auctions[auctionId];
+        a.seller = msg.sender;
+        a.nft = nft;
+        a.tokenId = tokenId;
+        a.payToken = payToken;
+        a.minBid = minBid;
+        a.buyNowPrice = buyNowPrice;
+        a.biddingEnd = uint64(block.timestamp) + duration;
+        a.status = AuctionStatus.Active;
 
         emit AuctionCreated(
             auctionId,
