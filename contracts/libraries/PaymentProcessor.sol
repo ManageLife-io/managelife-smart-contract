@@ -29,44 +29,23 @@ library PaymentProcessor {
     /// @notice Processes payment for transactions
     /// @dev Handles ERC20 token payments with proper fee calculation
     /// @param config Payment configuration containing fee settings
-    /// @param seller Address of the payment recipient
-    /// @param buyer Address of the payment sender
+    /// @param paymentRecipient Address of the payment recipient
     /// @param amount Total payment amount
     /// @param paymentToken Address of payment token
     function processPayment(
         PaymentConfig memory config,
-        address seller,
-        address buyer,
+        address paymentRecipient,
         uint256 amount,
         address paymentToken
     ) internal {
+        IERC20 token = IERC20(paymentToken);
         uint256 fees = (amount * config.baseFee) / config.percentageBase;
         uint256 netValue = amount - fees;
-        _processTokenPayment(paymentToken, buyer, seller, config.feeCollector, netValue, fees);
-        emit PaymentProcessed(seller, buyer, amount, fees, paymentToken);
-    }
-    
-    
-    /// @notice Processes ERC20 token payments
-    /// @dev Internal function to handle token transfers with fee deduction
-    /// @param paymentToken Address of the ERC20 token
-    /// @param buyer Address sending the payment
-    /// @param seller Address receiving the net payment
-    /// @param feeCollector Address receiving the fees
-    /// @param netValue Amount to send to seller (after fees)
-    /// @param fees Fee amount to send to collector
-    function _processTokenPayment(
-        address paymentToken,
-        address buyer,
-        address seller,
-        address feeCollector,
-        uint256 netValue,
-        uint256 fees
-    ) private {
-        IERC20 token = IERC20(paymentToken);
-        token.safeTransferFrom(buyer, seller, netValue);  
-        token.safeTransferFrom(buyer, feeCollector, fees);
 
+        token.safeTransfer(paymentRecipient, netValue);  
+        token.safeTransfer(config.feeCollector, fees);
+        emit PaymentProcessed(paymentRecipient, address(this), amount, fees, paymentToken);
     }
     
+        
 }
