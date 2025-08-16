@@ -13,12 +13,9 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     using SafeERC20 for IERC20;
 
     //Constants and immutable variables
+    //This should never be changed once we agree on a number that is gas-optimized, during testing.
     uint8 private constant TOP_BIDS_COUNT = 10;
     uint256 private constant PERCENTAGE_BASE = 10000;
-    //Maybe these should be configurable.
-    uint256 public immutable MIN_CONFIRMATION_PERIOD = 5 days;
-    uint256 public immutable MAX_CONFIRMATION_PERIOD = 14 days;
-    uint256 public immutable MAX_TOGGLE_BIDDING_RE_ACTIVATION_COUNT = 5;
 
     //Data Structures
     struct TopBidCandidate {
@@ -69,7 +66,9 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     }
 
     //State Variables
-
+    uint256 public minConfirmationPeriod;
+    uint256 public maxConfirmationPeriod;
+    uint256 public maxToggleBiddingReactivation;
     uint256 public minimumBidIncrement; // e.g., 50 = 0.5%, 100 = 1%
     IManageLifePropertyNFT public immutable manageLifePropertyNFT;
 
@@ -185,6 +184,18 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         uint128 amount,
         string reason
     );
+    event MinConfirmationPeriodSet(
+        uint256 oldMinConfirmationPeriod,
+        uint256 newMinConfirmationPeriod
+    );
+    event MaxConfirmationPeriodSet(
+        uint256 oldMaxConfirmationPeriod,
+        uint256 newMaxConfirmationPeriod
+    );
+    event MaxToggleBiddingReactivationSet(
+        uint256 oldMaxToggleBiddingReactivation,
+        uint256 newMaxToggleBiddingReactivation
+    );
 
     //Errors
     error ZeroAddress();
@@ -263,7 +274,15 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     error BidIsValid(uint256 tokenId, uint256 topBidIndex, address bidder);
     error OnlyTokenWhitelistManagerCanCall();
     error NotNftPropertyManager();
-
+    error OnlyProtocolParamManagerCanCall();
+    error MinConfirmationPeriodTooLow(
+        uint256 newMinConfirmationPeriod,
+        uint256 maxConfirmationPeriod
+    );
+    error MaxConfirmationPeriodTooLow(
+        uint256 newMaxConfirmationPeriod,
+        uint256 minConfirmationPeriod
+    );
     //Modifiers
     modifier onlyAdminControlAdmin() {
         if (
@@ -282,6 +301,18 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
             )
         ) {
             revert NotNftPropertyManager();
+        }
+        _;
+    }
+
+    modifier onlyProtocolParamManager() {
+        if (
+            !adminControl.hasRole(
+                adminControl.PROTOCOL_PARAM_MANAGER_ROLE(),
+                msg.sender
+            )
+        ) {
+            revert OnlyProtocolParamManagerCanCall();
         }
         _;
     }
@@ -346,6 +377,9 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         manageLifePropertyNFT = _manageLifePropertyNFT;
         adminControl = _adminControl;
         minimumBidIncrement = _minimumBidIncrement;
+        minConfirmationPeriod = 5 days;
+        maxConfirmationPeriod = 14 days;
+        maxToggleBiddingReactivation = 5;
     }
 
     //Receive function
@@ -388,16 +422,16 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         onlyAllowedToken(paymentToken)
         onlyNonZeroAmount(price)
     {
-        if (confirmationPeriod > MAX_CONFIRMATION_PERIOD) {
+        if (confirmationPeriod > maxConfirmationPeriod) {
             revert RequestedConfirmationPeriodTooLong(
                 confirmationPeriod,
-                MAX_CONFIRMATION_PERIOD
+                maxConfirmationPeriod
             );
         }
-        if (confirmationPeriod < MIN_CONFIRMATION_PERIOD) {
+        if (confirmationPeriod < minConfirmationPeriod) {
             revert RequestedConfirmationPeriodTooShort(
                 confirmationPeriod,
-                MIN_CONFIRMATION_PERIOD
+                minConfirmationPeriod
             );
         }
         _listPropertyWithConfirmation(
@@ -774,8 +808,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
             emit BiddingDeactivatedForListing(tokenId, msg.sender);
         } else {
             if (
-                listing.biddingActivationCount >=
-                MAX_TOGGLE_BIDDING_RE_ACTIVATION_COUNT
+                listing.biddingActivationCount >= maxToggleBiddingReactivation
             ) {
                 revert MaxBiddingReactivationCountReached(tokenId);
             }
@@ -785,7 +818,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
                 tokenId,
                 msg.sender,
                 listing.biddingActivationCount,
-                MAX_TOGGLE_BIDDING_RE_ACTIVATION_COUNT
+                maxToggleBiddingReactivation
             );
         }
         return listing.biddingActive;
@@ -896,6 +929,58 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
             purchase.paymentToken
         );
         delete pendingPurchases[tokenId]; //Delete the purchase from the pending purchases map.
+    }
+
+    //Configuration functions
+    function setMinConfirmationPeriod(
+        uint256 newMinConfirmationPeriod
+    ) external onlyProtocolParamManager {
+        if (newMinConfirmationPeriod == 0) {
+            revert ZeroAmount();
+        }
+        if (newMinConfirmationPeriod > maxConfirmationPeriod) {
+            revert MinConfirmationPeriodTooLow(
+                newMinConfirmationPeriod,
+                maxConfirmationPeriod
+            );
+        }
+        uint256 oldMinConfirmationPeriod = minConfirmationPeriod;
+        minConfirmationPeriod = newMinConfirmationPeriod;
+        emit MinConfirmationPeriodSet(
+            oldMinConfirmationPeriod,
+            newMinConfirmationPeriod
+        );
+    }
+
+    function setMaxConfirmationPeriod(
+        uint256 newMaxConfirmationPeriod
+    ) external onlyProtocolParamManager {
+        if (newMaxConfirmationPeriod < minConfirmationPeriod) {
+            revert MaxConfirmationPeriodTooLow(
+                newMaxConfirmationPeriod,
+                minConfirmationPeriod
+            );
+        }
+        uint256 oldMaxConfirmationPeriod = maxConfirmationPeriod;
+        maxConfirmationPeriod = newMaxConfirmationPeriod;
+        emit MaxConfirmationPeriodSet(
+            oldMaxConfirmationPeriod,
+            newMaxConfirmationPeriod
+        );
+    }
+
+    function setMaxToggleBiddingReactivation(
+        uint256 newMaxToggleBiddingReactivation
+    ) external onlyProtocolParamManager {
+        if (newMaxToggleBiddingReactivation == 0) {
+            revert ZeroAmount();
+        }
+        uint256 oldMaxToggleBiddingReactivation = maxToggleBiddingReactivation;
+        maxToggleBiddingReactivation = newMaxToggleBiddingReactivation;
+        emit MaxToggleBiddingReactivationSet(
+            oldMaxToggleBiddingReactivation,
+            newMaxToggleBiddingReactivation
+        );
     }
 
     //Admin Emergency functions
