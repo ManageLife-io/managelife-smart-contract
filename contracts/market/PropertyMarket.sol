@@ -9,21 +9,70 @@ import {AdminControl} from "../governance/AdminControl.sol";
 import {IManageLifePropertyNFT} from "../interfaces/IManageLifePropertyNFT.sol";
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 
+/**
+ * @title PropertyMarket
+ * @author ManageLife
+ * @dev A decentralized marketplace for buying, selling, and bidding on properties represented as NFTs.
+ * This contract handles property listings, direct purchases, bidding mechanisms, and the escrow of both NFTs and payment tokens.
+ * It integrates with an AdminControl contract for role-based access control and KYC verification.
+ * The market supports multiple ERC20 tokens for payments and includes mechanisms to ensure fair bidding and secure settlement.
+ * @dev Does not support rebasing or fee-on-transfer tokens!
+ * @dev Holds only N top bids for each property, where n = TOP_BIDS_COUNT.
+ * @dev Listing a property is done by the seller, and the NFT is held in escrow by this contract.
+ * @dev A purchase can be done at the listing price, or by bidding on the property. Either way, the seller must confirm the purchase within the confirmation period.
+ * @dev The seller can reject a purchase, or cancel it if it expires.
+ * @dev To accept a bid, the seller must deactivate bidding on the property, and then accept the bid (front-run protection).
+ * @dev The seller can turn bidding on and off, but there is a maximum number of times it can be reactivated.
+ * @dev A bid needs to be at least some percentage above the current highest bid, to be considered valid, according to the minimumBidIncrement.
+ * @dev No escrow of the payment token is done at the bid time, for capital efficiency. Only done when the seller confirms the purchase.
+ * @dev The seller can choose to accept any of the top bids, not necessarily the highest one.
+ * @dev This contract can be improve by: 1) adding a small bid bond for users to bid with, which can be returned to them under normal circumstances, but can be seized if their bid is not valid during a prune
+ * 2) Making the end of bids be time based, not controlled by seller.
+ */
 contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     using SafeERC20 for IERC20;
 
     //Constants and immutable variables
-    //This should never be changed once we agree on a number that is gas-optimized, during testing.
+    /**
+     * @dev The maximum number of top bids to track for each property listing.
+     * This value is chosen for gas optimization and should not be changed after deployment.
+     */
     uint8 private constant TOP_BIDS_COUNT = 10;
+    /**
+     * @dev The base value for percentage calculations (e.g., 10000 = 100.00%).
+     * Used to express percentages with two decimal places of precision.
+     */
     uint256 private constant PERCENTAGE_BASE = 10000;
 
     //Data Structures
+    /**
+     * @notice Represents a candidate for the top bids on a property.
+     * @param bidder The address of the account that placed the bid.
+     * @param amount The amount of the bid, relative to the token in the listing.
+     * @param bidTimestamp The timestamp when the bid was placed.
+     */
     struct TopBidCandidate {
         address bidder;
         uint128 amount;
         uint64 bidTimestamp;
     }
 
+    /**
+     * @notice Contains all the details of a property listed on the market.
+     * @param tokenId The unique identifier for the property NFT.
+     * @param price The listing price of the property.
+     * @param listTimestamp The timestamp when the property was listed.
+     * @param lastRenewed The timestamp when the listing was last updated.
+     * @param confirmationPeriod The duration the seller has to confirm or reject a purchase.
+     * @param biddingActivationCount The number of times bidding has been reactivated for this listing.
+     * @param highestBid The current highest bid amount for the property.
+     * @param seller The address of the property's seller.
+     * @param paymentToken The ERC20 token used for payment. Non rebase or fee-on-transfer tokens allowed.
+     * @param highestBidder The address of the current highest bidder.
+     * @param status The current status of the property listing (e.g., LISTED, SOLD).
+     * @param biddingActive A flag indicating if bidding is currently active for the property.
+     * @param topBids An array holding the top bids for the property.
+     */
     struct PropertyListing {
         // Slot 1
         uint256 tokenId; // 32 bytes
@@ -46,6 +95,17 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         TopBidCandidate[TOP_BIDS_COUNT] topBids;
     }
 
+    /**
+     * @notice Represents a purchase that is awaiting seller confirmation for a particular property.
+     * @param price The agreed-upon price for the purchase, either an accepted bid, or the listing price.
+     * @param purchaseTimestamp The timestamp when the purchase was initiated.
+     * @param confirmationDeadline The timestamp by which the seller must confirm the purchase.
+     * @param tokenId The ID of the property NFT being purchased.
+     * @param buyer The address of the buyer.
+     * @param fee The protocol fee percentage for the transaction, based on PERCENTAGE_BASE.
+     * @param paymentToken The ERC20 token used for the purchase.
+     * @param feeCollector The address that will receive the protocol fees.
+     */
     struct PendingPurchase {
         uint128 price; // slot 0 (16)
         uint64 purchaseTimestamp; // slot 0 (8)
@@ -57,35 +117,89 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         address feeCollector; // slot 4 (20) -> 12 wasted
     }
 
+    /**
+     * @notice Defines the possible states of a property listing.
+     * @dev UNINITIALIZED: Default zero state. A listing should not be in this state. Only here for safety.
+     * @dev LISTED: The property is actively listed for sale.
+     * @dev SOLD: The property has been sold and is no longer on the market. Can be relisted.
+     * @dev DELISTED: The seller has removed the property from the market. Can be relisted.
+     * @dev PENDING_SELLER_CONFIRMATION: A purchase has been initiated and is awaiting the seller's approval.
+     */
     enum PropertyStatus {
-        UNINITIALIZED, //Safety status before a listing is completed.
+        UNINITIALIZED,
         LISTED,
         SOLD,
         DELISTED,
-        PENDING_SELLER_CONFIRMATION //Also used for escrow period.
+        PENDING_SELLER_CONFIRMATION
     }
 
     //State Variables
+    /**
+     * @notice The minimum duration a seller can set for the purchase confirmation period.
+     */
     uint256 public minConfirmationPeriod;
+    /**
+     * @notice The maximum duration a seller can set for the purchase confirmation period.
+     */
     uint256 public maxConfirmationPeriod;
+    /**
+     * @notice The maximum number of times a seller can reactivate bidding on a property.
+     */
     uint256 public maxToggleBiddingReactivation;
+    /**
+     * @notice The minimum percentage increment required for a new bid over the current highest bid, based on PERCENTAGE_BASE, in Basis Points.
+     */
     uint256 public minimumBidIncrement; // e.g., 50 = 0.5%, 100 = 1%
+    /**
+     * @notice The instance of the ManageLifePropertyNFT contract that this market operates on.
+     */
     IManageLifePropertyNFT public immutable manageLifePropertyNFT;
 
-    //Note: no rebasing or fee-on-transfer tokens allowed!
+    /**
+     * @notice A mapping of ERC20 token addresses that are permitted for use as payment. No rebasing or fee-on-transfer tokens allowed.
+     */
     mapping(address => bool) public allowedPaymentTokens;
+    /**
+     * @notice The AdminControl contract instance for managing roles, KYC, and fees.
+     */
     AdminControl public adminControl;
+    /**
+     * @notice Mapping from token ID to the property listing details.
+     */
     mapping(uint256 => PropertyListing) public listings;
+    /**
+     * @notice Mapping from token ID to details of a pending purchase.
+     */
     mapping(uint256 => PendingPurchase) public pendingPurchases;
 
     //Events
+    /**
+     * @notice Emitted when a new property is listed on the market.
+     * @param tokenId The ID of the listed NFT.
+     * @param seller The address of the seller.
+     * @param price The listing price.
+     * @param paymentToken The ERC20 token for payment.
+     */
     event NewListing(
         uint256 indexed tokenId,
         address indexed seller,
         uint128 price,
         address paymentToken
     );
+    /**
+     * @notice Emitted when a property is unlisted from the market.
+     * @param tokenId The ID of the unlisted NFT.
+     * @param seller The address of the seller who unlisted the property.
+     */
     event PropertyUnlisted(uint256 indexed tokenId, address indexed seller);
+    /**
+     * @notice Emitted when a property is successfully sold.
+     * @param tokenId The ID of the sold NFT.
+     * @param buyer The address of the buyer.
+     * @param price The final sale price.
+     * @param paymentToken The ERC20 token used for payment.
+     * @param isFromBidding True if the sale resulted from accepting a bid, false otherwise.
+     */
     event PropertySold(
         uint256 indexed tokenId,
         address indexed buyer,
@@ -93,6 +207,14 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         address indexed paymentToken,
         bool isFromBidding
     );
+    /**
+     * @notice Emitted when a seller accepts a bid.
+     * @param tokenId The ID of the NFT.
+     * @param seller The address of the seller.
+     * @param bidder The address of the bidder whose bid was accepted.
+     * @param amount The accepted bid amount.
+     * @param paymentToken The ERC20 token for payment.
+     */
     event BidAccepted(
         uint256 indexed tokenId,
         address indexed seller,
@@ -100,30 +222,73 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         uint128 amount,
         address paymentToken
     );
+    /**
+     * @notice Emitted when a bid is removed or withdrawn.
+     * @param tokenId The ID of the NFT.
+     * @param bidder The address of the bidder.
+     * @param amount The amount of the removed bid.
+     */
     event BidRemoved(
         uint256 indexed tokenId,
         address indexed bidder,
         uint128 amount
     );
+    /**
+     * @notice Emitted when a new ERC20 token is added to the list of allowed payment tokens.
+     * @param token The address of the added token.
+     */
     event PaymentTokenAdded(address indexed token);
+    /**
+     * @notice Emitted when an ERC20 token is removed from the list of allowed payment tokens.
+     * @param token The address of the removed token.
+     */
     event PaymentTokenRemoved(address indexed token);
+    /**
+     * @notice Emitted when the payment token for a listing is changed.
+     * @param tokenId The ID of the NFT.
+     * @param oldToken The address of the old payment token.
+     * @param newToken The address of the new payment token.
+     * @param caller The address that initiated the change, can be seller or admin.
+     */
     event ListingTokenChanged(
         uint256 indexed tokenId,
         address indexed oldToken,
         address indexed newToken,
         address caller
     );
+    /**
+     * @notice Emitted when the price for a listing is changed.
+     * @param tokenId The ID of the NFT.
+     * @param oldPrice The old price.
+     * @param newPrice The new price.
+     * @param caller The address that initiated the change.
+     */
     event ListingPriceChanged(
         uint256 indexed tokenId,
         uint128 oldPrice,
         uint128 newPrice,
         address indexed caller
     );
+    /**
+     * @notice Emitted when tokens are withdrawn from the contract in an emergency.
+     * @param token The address of the withdrawn ERC20 token.
+     * @param recipient The address that received the tokens.
+     * @param amount The amount of tokens withdrawn.
+     */
     event EmergencyTokenWithdrawal(
         address indexed token,
         address indexed recipient,
         uint256 amount
     );
+    /**
+     * @notice Emitted when a buyer requests to purchase a property.
+     * @param tokenId The ID of the NFT.
+     * @param buyer The address of the buyer.
+     * @param offerPrice The price offered by the buyer.
+     * @param paymentToken The ERC20 token for payment.
+     * @param confirmationDeadline The deadline for the seller to confirm.
+     * @param isFromBidding True if the request is from an accepted bid, false otherwise.
+     */
     event PurchaseRequested(
         uint256 indexed tokenId,
         address indexed buyer,
@@ -132,6 +297,15 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         uint64 confirmationDeadline,
         bool isFromBidding
     );
+    /**
+     * @notice Emitted when a seller rejects a purchase request.
+     * @param tokenId The ID of the NFT.
+     * @param seller The address of the seller.
+     * @param buyer The address of the buyer whose request was rejected.
+     * @param offerPrice The price offered.
+     * @param paymentToken The ERC20 token for payment.
+     * @param isFromBidding True if the request was from an accepted bid.
+     */
     event PurchaseRejected(
         uint256 indexed tokenId,
         address indexed seller,
@@ -140,6 +314,13 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         address paymentToken,
         bool isFromBidding
     );
+    /**
+     * @notice Emitted when a pending purchase expires without seller confirmation.
+     * @param tokenId The ID of the NFT.
+     * @param buyer The address of the buyer.
+     * @param offerPrice The price that was offered.
+     * @param paymentToken The ERC20 token for payment.
+     */
     event PurchaseExpired(
         uint256 indexed tokenId,
         address indexed buyer,
@@ -147,6 +328,15 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         address indexed paymentToken
     );
 
+    /**
+     * @notice Emitted when a payment is processed and distributed.
+     * @param paymentRecipient The address receiving the net sale amount (seller).
+     * @param paymentSender The address that sent the funds (this contract).
+     * @param amount The total amount of the payment before fees.
+     * @param fees The amount deducted as protocol fees.
+     * @param paymentToken The ERC20 token used for the payment.
+     * @param feeCollector The address that received the fees.
+     */
     event PaymentProcessed(
         address indexed paymentRecipient,
         address indexed paymentSender,
@@ -156,42 +346,88 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         address feeCollector
     );
 
+    /**
+     * @notice Emitted when a seller deactivates bidding on a property listing.
+     * @param tokenId The ID of the NFT.
+     * @param seller The address of the seller.
+     */
     event BiddingDeactivatedForListing(
         uint256 indexed tokenId,
         address indexed seller
     );
 
+    /**
+     * @notice Emitted when a seller reactivates bidding on a property listing.
+     * @param tokenId The ID of the NFT.
+     * @param seller The address of the seller.
+     * @param biddingActivationCount The new count of bidding activations.
+     * @param maxBiddingActivationCount The maximum allowed count of bidding activations.
+     */
     event BiddingReactivatedForListing(
         uint256 indexed tokenId,
         address indexed seller,
         uint256 biddingActivationCount,
         uint256 maxBiddingActivationCount
     );
+    /**
+     * @notice Emitted when a new bid is placed on a property.
+     * @param tokenId The ID of the NFT.
+     * @param bidder The address of the bidder.
+     * @param amount The amount of the bid.
+     * @param paymentToken The ERC20 token used for the bid.
+     */
     event BidPlaced(
         uint256 indexed tokenId,
         address indexed bidder,
         uint128 amount,
         address paymentToken
     );
+    /**
+     * @notice Emitted when all bids for a property are cleared, typically after a listing update.
+     * @param tokenId The ID of the NFT.
+     * @param clearedBy The address that triggered the clearing of bids.
+     */
     event AllBidsClearedForProperty(
         uint256 indexed tokenId,
         address indexed clearedBy
     );
 
+    /**
+     * @notice Emitted when a bid is pruned (removed) because it is no longer valid.
+     * @param tokenId The ID of the NFT.
+     * @param bidder The address of the bidder whose bid was pruned.
+     * @param amount The amount of the pruned bid.
+     * @param reason A string indicating why the bid was pruned (e.g., "low allowance", "low balance").
+     */
     event BidPruned(
         uint256 indexed tokenId,
         address indexed bidder,
         uint128 amount,
         string reason
     );
+    /**
+     * @notice Emitted when the minimum confirmation period is updated.
+     * @param oldMinConfirmationPeriod The previous minimum period.
+     * @param newMinConfirmationPeriod The new minimum period.
+     */
     event MinConfirmationPeriodSet(
         uint256 oldMinConfirmationPeriod,
         uint256 newMinConfirmationPeriod
     );
+    /**
+     * @notice Emitted when the maximum confirmation period is updated.
+     * @param oldMaxConfirmationPeriod The previous maximum period.
+     * @param newMaxConfirmationPeriod The new maximum period.
+     */
     event MaxConfirmationPeriodSet(
         uint256 oldMaxConfirmationPeriod,
         uint256 newMaxConfirmationPeriod
     );
+    /**
+     * @notice Emitted when the maximum number of bidding reactivations is updated.
+     * @param oldMaxToggleBiddingReactivation The previous maximum count.
+     * @param newMaxToggleBiddingReactivation The new maximum count.
+     */
     event MaxToggleBiddingReactivationSet(
         uint256 oldMaxToggleBiddingReactivation,
         uint256 newMaxToggleBiddingReactivation
@@ -210,7 +446,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     error NotKYCVerified(address user);
     error NotAllowedToken(address token);
     error ZeroAmount();
-    error HighestBidIsHigherThanListingPrice(
+    error HighestBidIsValidAndHigherThanListingPrice(
         uint256 tokenId,
         uint128 highestBid,
         uint128 listingPrice
@@ -360,10 +596,14 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
 
     //Constructor
 
+    /**
+     * @notice Initializes the PropertyMarket contract.
+     * @param _manageLifePropertyNFT The address of the ManageLifePropertyNFT contract.
+     * @param _adminControl The address of the AdminControl contract.
+     */
     constructor(
         IManageLifePropertyNFT _manageLifePropertyNFT,
-        AdminControl _adminControl,
-        uint256 _minimumBidIncrement
+        AdminControl _adminControl
     ) {
         if (address(_manageLifePropertyNFT) == address(0)) {
             revert ZeroAddress();
@@ -376,20 +616,28 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
 
         manageLifePropertyNFT = _manageLifePropertyNFT;
         adminControl = _adminControl;
-        minimumBidIncrement = _minimumBidIncrement;
-        minConfirmationPeriod = 5 days;
-        maxConfirmationPeriod = 14 days;
-        maxToggleBiddingReactivation = 5;
+        minimumBidIncrement = 100; //defaults to 1%
+        minConfirmationPeriod = 5 days; //defaults to 5 days
+        maxConfirmationPeriod = 14 days; //defaults to 14 days
+        maxToggleBiddingReactivation = 5; //defaults to 5
     }
 
     //Receive function
 
+    /**
+     * @notice Reverts direct Ether transfers to the contract to prevent accidental sends.
+     */
     //We don't want to allow direct eth transfers to the contract
     receive() external payable {
         revert DirectEthTransferNotAllowed();
     }
 
     //External functions
+    /**
+     * @notice Adds an ERC20 token to the whitelist of allowed payment tokens.
+     * @dev Can only be called by an account with the TOKEN_WHITELIST_MANAGER_ROLE.
+     * @param token The address of the ERC20 token to add.
+     */
     function addAllowedToken(address token) external onlyTokenWhitelistManager {
         if (token == address(0)) {
             revert InvalidToken();
@@ -398,7 +646,12 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         emit PaymentTokenAdded(token);
     }
 
-    //Only affects new listings, existing listings are not affected.
+    /**
+     * @notice Removes an ERC20 token from the whitelist of allowed payment tokens.
+     * @dev This only affects new listings; existing listings with this token remain valid.
+     * @dev Can only be called by an account with the TOKEN_WHITELIST_MANAGER_ROLE.
+     * @param token The address of the ERC20 token to remove.
+     */
     function removeAllowedToken(
         address token
     ) external onlyTokenWhitelistManager {
@@ -410,6 +663,15 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     }
 
     //Step 1: Listing and unlisting
+    /**
+     * @notice Lists a property for sale on the marketplace.
+     * @dev The sender must be the owner of the NFT and have approved this contract to transfer it.
+     * @dev The NFT will be held in escrow by this contract upon successful sale or unlisting.
+     * @param tokenId The ID of the NFT to list.
+     * @param price The listing price.
+     * @param paymentToken The address of the ERC20 token for payment.
+     * @param confirmationPeriod The time in seconds the seller has to confirm a purchase.
+     */
     function listProperty(
         uint256 tokenId,
         uint128 price,
@@ -442,6 +704,12 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         );
     }
 
+    /**
+     * @notice Unlists a property from the marketplace.
+     * @dev The NFT held in escrow is returned to the seller.
+     * @dev Can only be called by the seller of the property, in the listed state, not in a pending purchase.
+     * @param tokenId The ID of the NFT to unlist.
+     */
     function unlistProperty(
         uint256 tokenId
     ) external onlyKYCVerified onlySellerCanCall(tokenId) nonReentrant {
@@ -460,6 +728,14 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         emit PropertyUnlisted(tokenId, msg.sender);
     }
 
+    /**
+     * @notice Updates the price and/or payment token of a listing by an admin.
+     * @dev This will clear all existing bids on the property.
+     * @dev Can only be called by an account with the NFT_PROPERTY_MANAGER_ROLE.
+     * @param tokenId The ID of the NFT to update.
+     * @param newPrice The new listing price.
+     * @param newPaymentToken The new ERC20 payment token.
+     */
     function updateListingByAdmin(
         uint256 tokenId,
         uint128 newPrice,
@@ -474,8 +750,12 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     }
 
     /**
-     * @notice Updates a listing by the seller.
-     * @notice Doesn't need reentrnacy, but it's there to prevent cross-function reentrancy.
+     * @notice Updates the price and/or payment token of a listing by the seller.
+     * @notice Doesn't need reentrancy, but it's there to prevent cross-function reentrancy.
+     * @dev This will clear all existing bids on the property.
+     * @param tokenId The ID of the NFT to update.
+     * @param newPrice The new listing price.
+     * @param newPaymentToken The new ERC20 payment token.
      */
     function updateListingBySeller(
         uint256 tokenId,
@@ -494,7 +774,13 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
 
     //Step 2: Non-Bidding Purchases, called by buyers that don't want to bid and just buy at listing price.
 
-    //Separate function for accepting the listing price, no bids.
+    /**
+     * @notice Initiates a purchase of a property at its current listing price.
+     * @dev This creates a pending purchase and escrows the buyer's funds. The seller must confirm the purchase.
+     * @dev This function will fail if there is an active bid higher than the listing price.
+     * @param tokenId The ID of the NFT to purchase.
+     * @param expectedFee The expected protocol fee percentage, used for front-run protection.
+     */
     function purchasePropertyAtListingPrice(
         uint256 tokenId,
         uint256 expectedFee
@@ -505,12 +791,21 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         }
         uint128 highestBid = listing.highestBid;
         if (highestBid > listing.price) {
-            //Can no longer do a purchase at listing price, because there is a higher bid, need to go bid.
-            revert HighestBidIsHigherThanListingPrice(
-                tokenId,
-                highestBid,
-                listing.price
+            TopBidCandidate storage topBid = listing.topBids[0];
+            uint256 allowance = IERC20(listing.paymentToken).allowance(
+                topBid.bidder,
+                address(this)
             );
+            uint256 balance = IERC20(listing.paymentToken).balanceOf(
+                topBid.bidder
+            );
+            if (allowance >= topBid.amount && balance >= topBid.amount) {
+                revert HighestBidIsValidAndHigherThanListingPrice(
+                    tokenId,
+                    highestBid,
+                    listing.price
+                );
+            }
         }
         _createPendingPurchase(
             tokenId,
@@ -523,8 +818,12 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
 
     //Step 3: Purchase confirmations or rejections, and dealing with expired purchases.
 
-    //Perfom full settlement here because both the NFT and tokens are escrowed.
-    //Currently this is being used for the listing price purchase.
+    /**
+     * @notice Confirms a pending purchase, completing the sale.
+     * @dev Transfers the NFT to the buyer and the payment (less fees) to the seller.
+     * @dev Can only be called by the seller before the confirmation period expires.
+     * @param tokenId The ID of the NFT being purchased.
+     */
     function confirmPurchase(
         uint256 tokenId
     ) external nonReentrant onlySellerCanCall(tokenId) onlyKYCVerified {
@@ -557,7 +856,13 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         );
     }
 
-    //Rejects a particular purchase, refunds the tokens, but NOT the NFT because it's back in listed state, awaiting a new sale.
+    /**
+     * @notice Rejects a pending purchase.
+     * @dev The buyer's escrowed funds are returned. The property is returned to the LISTED state.
+     * @dev If the purchase was from a bid, that bid is removed.
+     * @dev Can only be called by the seller before the confirmation period expires.
+     * @param tokenId The ID of the NFT.
+     */
     function rejectPurchase(
         uint256 tokenId
     ) external onlySellerCanCall(tokenId) onlyKYCVerified nonReentrant {
@@ -587,17 +892,23 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         }
     }
 
+    /**
+     * @notice Allows a anyone to check and remove invalid bids from the top bids list.
+     * @dev A bid is considered invalid if the bidder no longer has sufficient balance or allowance for the payment token.
+     * @dev Provides front-run protection by requiring expected bidder and amount.
+     * @dev In the future, we can reward the caller of this function with a small fee, to incentivize them to do this, and keep auctions fair, and prevent fake bidders.
+     * @param tokenId The ID of the NFT.
+     * @param topBidIndex The index of the bid to check in the `topBids` array.
+     * @param expectedBidder The expected address of the bidder at the given index.
+     * @param expectedAmount The expected bid amount at the given index.
+     * @return removed True if the bid was invalid and removed, otherwise the call reverts.
+     */
     function pruneInvalidBids(
         uint256 tokenId,
         uint256 topBidIndex,
         address expectedBidder,
         uint128 expectedAmount
-    )
-        external
-        onlySellerCanCall(tokenId)
-        onlyKYCVerified
-        returns (bool removed)
-    {
+    ) external onlyKYCVerified returns (bool removed) {
         PropertyListing storage listing = listings[tokenId];
         if (listing.status != PropertyStatus.LISTED) {
             revert TokenNotListed(tokenId);
@@ -651,7 +962,8 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
 
     /**
      * @notice Places a bid on a listed property, ensuring only one bid per user.
-     * @notice Doesn't need reentrnacy, but it's there to prevent cross-function reentrancy.
+     * @notice Doesn't need reentrancy, but it's there to prevent cross-function reentrancy.
+     * @notice Funds are not escrowed at bid time, for capital efficiency.
      * @dev This function uses a "remove and re-insert" pattern to handle existing
      *      bidders who want to increase their bid. This ensures the `topBids`
      *      array remains sorted and contains unique bidders.
@@ -684,6 +996,8 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      *      [1]: { bidder: Alice, amount: 100 }
      *      [2]: { bidder: Bob, amount: 90 }
      *      [3]: { bidder: David, amount: 85 }
+     * @param tokenId The ID of the NFT to bid on.
+     * @param bidAmount The amount of the bid.
      */
     function placeBid(
         uint256 tokenId,
@@ -761,7 +1075,8 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
 
     /**
      * @notice Withdraws a bid from a listed property.
-     * @notice Doesn't need reentrnacy, but it's there to prevent cross-function reentrancy.
+     * @notice Doesn't need reentrancy, but it's there to prevent cross-function reentrancy.
+     * @param tokenId The ID of the NFT from which to withdraw the bid.
      */
     function withdrawBid(
         uint256 tokenId
@@ -780,14 +1095,19 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         }
     }
 
-    //Note: This mechanism was implemented to prevent griefing/DOS attacks against the acceptBid function.
-    //However, this opens the doors to the seller changing the status to fish for better bids, which could frustrate bidders
-    //This is a good tradeoff, but it's importanat to recognize that it gives the seller more power.
-    //I added a max count of re-activations to prevent abuse, and have the seller finally have to accept a bid.
-    //Could be made more fair by having the bid status depend on time.
     /**
      * @notice Toggles the bidding active status for a listed property.
-     * @notice Doesn't need reentrnacy, but it's there to prevent cross-function reentrancy.
+     * @notice Doesn't need reentrancy, but it's there to prevent cross-function reentrancy.
+    /**
+     * @dev This mechanism was implemented to prevent griefing/DoS attacks against the acceptBid function.
+     * However, it allows the seller to toggle the bidding status to fish for better bids, which could frustrate bidders.
+     * This is considered a reasonable tradeoff, but it does give the seller more power.
+     * To prevent abuse, a maximum number of bidding reactivations is enforced, requiring the seller to eventually accept a bid.
+     * This could be made more fair by having the bid status depend on time.
+     *
+     * @dev Can only be called by the seller. There's a maximum number of times bidding can be reactivated.
+     * @param tokenId The ID of the NFT.
+     * @return The new bidding status (true if active, false if inactive).
      */
     function toggleBiddingActiveStatus(
         uint256 tokenId
@@ -824,7 +1144,17 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         return listing.biddingActive;
     }
 
-    //seller calls
+    /**
+     * @notice Allows a seller to accept one of the top bids.
+     * @dev Bidding must be deactivated on the listing before a bid can be accepted.
+     * @dev This creates a pending purchase, which the seller must then confirm to finalize the sale.
+     * @dev Provides front-run protection by requiring expected bidder and amount.
+     * @param tokenId The ID of the NFT.
+     * @param topBidIndex The index of the bid to accept in the `topBids` array.
+     * @param expectedBidder The expected address of the bidder being accepted.
+     * @param expectedAmount The expected amount of the bid being accepted.
+     * @param expectedFee The expected protocol fee percentage.
+     */
     function acceptBid(
         uint256 tokenId,
         uint256 topBidIndex,
@@ -883,8 +1213,12 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         );
     }
 
-    //An expired purchase is a purchase that has not been confirmed or rejected within the confirmation period.
-    //Puts the token back into listed state, where bids can be placed again.
+    /**
+     * @notice Cancels a pending purchase that has passed its confirmation deadline, callable by seller or buyer.
+     * @dev Returns the escrowed funds to the buyer and puts the property back into the LISTED state.
+     * @dev Can be called by either the seller or the buyer of the expired purchase.
+     * @param tokenId The ID of the NFT with the expired purchase.
+     */
     function cancelExpiredPurchase(
         uint256 tokenId
     ) external nonReentrant onlyKYCVerified {
@@ -932,6 +1266,11 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     }
 
     //Configuration functions
+    /**
+     * @notice Sets the minimum confirmation period for new listings.
+     * @dev Can only be called by an account with the PROTOCOL_PARAM_MANAGER_ROLE.
+     * @param newMinConfirmationPeriod The new minimum period in seconds.
+     */
     function setMinConfirmationPeriod(
         uint256 newMinConfirmationPeriod
     ) external onlyProtocolParamManager {
@@ -952,6 +1291,11 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         );
     }
 
+    /**
+     * @notice Sets the maximum confirmation period for new listings.
+     * @dev Can only be called by an account with the PROTOCOL_PARAM_MANAGER_ROLE.
+     * @param newMaxConfirmationPeriod The new maximum period in seconds.
+     */
     function setMaxConfirmationPeriod(
         uint256 newMaxConfirmationPeriod
     ) external onlyProtocolParamManager {
@@ -969,6 +1313,11 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         );
     }
 
+    /**
+     * @notice Sets the maximum number of times a seller can reactivate bidding on a listing.
+     * @dev Can only be called by an account with the PROTOCOL_PARAM_MANAGER_ROLE.
+     * @param newMaxToggleBiddingReactivation The new maximum count.
+     */
     function setMaxToggleBiddingReactivation(
         uint256 newMaxToggleBiddingReactivation
     ) external onlyProtocolParamManager {
@@ -984,7 +1333,14 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     }
 
     //Admin Emergency functions
-    //TODO: add time lock to this.
+    /**
+     * @notice Allows an admin to withdraw any ERC20 tokens from this contract in an emergency.
+     * @dev This is a failsafe and should be used with extreme caution.
+     * @dev Consider adding a time lock to this function for enhanced security. TODO: we need to add a time lock to this.
+     * @param token The address of the ERC20 token to withdraw.
+     * @param amount The amount of tokens to withdraw.
+     * @param recipient The address to receive the withdrawn tokens.
+     */
     function emergencyWithdrawToken(
         address token,
         uint256 amount,
@@ -1008,6 +1364,19 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
 
     //View functions
 
+    /**
+     * @notice Retrieves the main details of a property listing.
+     * @param tokenId The ID of the NFT.
+     * @return seller The seller's address.
+     * @return price The listing price.
+     * @return paymentToken The ERC20 payment token address.
+     * @return status The current status of the listing.
+     * @return listTimestamp The timestamp of when it was listed.
+     * @return confirmationPeriod The confirmation period in seconds.
+     * @return biddingActive Whether bidding is currently active.
+     * @return highestBidder The address of the highest bidder.
+     * @return highestBid The amount of the highest bid.
+     */
     function getListingDetails(
         uint256 tokenId
     )
@@ -1039,6 +1408,11 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         );
     }
 
+    /**
+     * @notice Retrieves the list of top bids for a specific property.
+     * @param tokenId The ID of the NFT.
+     * @return An array of `TopBidCandidate` structs representing the top bids.
+     */
     function getTopBidsForListing(
         uint256 tokenId
     ) external view returns (TopBidCandidate[TOP_BIDS_COUNT] memory) {
@@ -1048,6 +1422,14 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
 
     //ERC721Receiver interface
 
+    /**
+     * @notice Handles the receipt of an NFT.
+     * @dev This function is part of the ERC721 standard. It ensures that NFTs are only
+     * accepted into this contract as part of the `listProperty` flow.
+     * @param from The address which sent the NFT.
+     * @param tokenId The ID of the NFT.
+     * @return A selector indicating that the contract can receive ERC721 tokens.
+     */
     function onERC721Received(
         address operator,
         address from,
