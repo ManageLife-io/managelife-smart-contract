@@ -6,11 +6,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {AdminControl} from "../governance/AdminControl.sol";
-import {PaymentProcessor} from "../libraries/PaymentProcessor.sol"; //TODO: merge this library into this contract - only place it's used.
 import {IManageLifePropertyNFT} from "../interfaces/IManageLifePropertyNFT.sol";
+import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 
-
-contract PropertyMarket is ReentrancyGuard {
+contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     using SafeERC20 for IERC20;
 
     //Constants and immutable variables
@@ -19,44 +18,50 @@ contract PropertyMarket is ReentrancyGuard {
     //Maybe these should be configurable.
     uint256 public immutable MIN_CONFIRMATION_PERIOD = 5 days;
     uint256 public immutable MAX_CONFIRMATION_PERIOD = 14 days;
+    uint256 public immutable MAX_TOGGLE_BIDDING_RE_ACTIVATION_COUNT = 5;
 
     //Data Structures
     struct TopBidCandidate {
         address bidder;
-        uint256 amount;
-        uint256 bidTimestamp;
+        uint128 amount;
+        uint64 bidTimestamp;
     }
 
-    //TODO: struct packing
     struct PropertyListing {
-        //Maybe can add min bid to make more flexible later
-        uint256 tokenId;
-        address seller;
-        uint256 price;
-        address paymentToken;
-        PropertyStatus status;
-        uint256 listTimestamp;
-        uint256 lastRenewed;
-        uint256 confirmationPeriod;
-        // global bidding state for the listing/auction
-        bool biddingActive;
-        address highestBidder;
-        uint256 highestBid;
+        // Slot 1
+        uint256 tokenId; // 32 bytes
+        // Slot 2
+        uint128 price; // 16 bytes (covers up to ~3.4e38 in wei with 18d decimals)
+        uint64 listTimestamp; // 8 bytes (fits ~584B years in seconds)
+        uint64 lastRenewed; // 8 bytes
+        // Slot 3
+        uint64 confirmationPeriod; // 8 bytes (max 18k years, more than enough)
+        uint64 biddingActivationCount; // 8 bytes
+        uint128 highestBid; // 16 bytes
+        // Slot 4
+        address seller; // 20 bytes
+        address paymentToken; // 20 bytes (will spill to next slot)
+        // Slot 5
+        address highestBidder; // 20 bytes
+        PropertyStatus status; // 1 byte enum
+        bool biddingActive; // 1 byte
+        // Slot 6+ : topBids array (fixed TopBidCandidate[TOP_BIDS_COUNT])
         TopBidCandidate[TOP_BIDS_COUNT] topBids;
     }
 
     struct PendingPurchase {
-        uint256 tokenId;
-        address buyer;
-        uint256 price;
-        address paymentToken;
-        uint256 purchaseTimestamp;
-        uint256 confirmationDeadline;
-        // escrow
-        bool fundsDeposited;
+        uint128 price; // slot 0 (16)
+        uint64 purchaseTimestamp; // slot 0 (8)
+        uint64 confirmationDeadline; // slot 0 (8)
+        uint256 tokenId; // slot 1 (32)
+        address buyer; // slot 2 (20)
+        uint64 fee; // slot 2 (+8) -> 28 used, 4 wasted
+        address paymentToken; // slot 3 (20) -> 12 wasted
+        address feeCollector; // slot 4 (20) -> 12 wasted
     }
 
     enum PropertyStatus {
+        UNINITIALIZED, //Safety status before a listing is completed.
         LISTED,
         SOLD,
         DELISTED,
@@ -67,6 +72,8 @@ contract PropertyMarket is ReentrancyGuard {
 
     uint256 public minimumBidIncrement; // e.g., 50 = 0.5%, 100 = 1%
     IManageLifePropertyNFT public immutable manageLifePropertyNFT;
+
+    //Note: no rebasing or fee-on-transfer tokens allowed!
     mapping(address => bool) public allowedPaymentTokens;
     AdminControl public adminControl;
     mapping(uint256 => PropertyListing) public listings;
@@ -76,14 +83,14 @@ contract PropertyMarket is ReentrancyGuard {
     event NewListing(
         uint256 indexed tokenId,
         address indexed seller,
-        uint256 price,
+        uint128 price,
         address paymentToken
     );
     event PropertyUnlisted(uint256 indexed tokenId, address indexed seller);
     event PropertySold(
         uint256 indexed tokenId,
         address indexed buyer,
-        uint256 price,
+        uint128 price,
         address indexed paymentToken,
         bool isFromBidding
     );
@@ -91,13 +98,13 @@ contract PropertyMarket is ReentrancyGuard {
         uint256 indexed tokenId,
         address indexed seller,
         address indexed bidder,
-        uint256 amount,
-        address indexedpaymentToken
+        uint128 amount,
+        address paymentToken
     );
     event BidRemoved(
         uint256 indexed tokenId,
         address indexed bidder,
-        uint256 amount
+        uint128 amount
     );
     event PaymentTokenAdded(address indexed token);
     event PaymentTokenRemoved(address indexed token);
@@ -109,8 +116,8 @@ contract PropertyMarket is ReentrancyGuard {
     );
     event ListingPriceChanged(
         uint256 indexed tokenId,
-        uint256 oldPrice,
-        uint256 newPrice,
+        uint128 oldPrice,
+        uint128 newPrice,
         address indexed caller
     );
     event EmergencyTokenWithdrawal(
@@ -118,49 +125,65 @@ contract PropertyMarket is ReentrancyGuard {
         address indexed recipient,
         uint256 amount
     );
-    event CompetitivePurchase(
-        uint256 indexed tokenId,
-        address indexed buyer,
-        uint256 purchasePrice,
-        uint256 highestBidOutbid,
-        address indexed paymentToken
-    );
     event PurchaseRequested(
         uint256 indexed tokenId,
         address indexed buyer,
-        uint256 offerPrice,
+        uint128 offerPrice,
         address indexed paymentToken,
-        uint256 confirmationDeadline,
+        uint64 confirmationDeadline,
         bool isFromBidding
     );
     event PurchaseRejected(
         uint256 indexed tokenId,
         address indexed seller,
         address indexed buyer,
-        uint256 offerPrice,
+        uint128 offerPrice,
         address paymentToken,
         bool isFromBidding
     );
     event PurchaseExpired(
         uint256 indexed tokenId,
         address indexed buyer,
-        uint256 offerPrice,
+        uint128 offerPrice,
         address indexed paymentToken
     );
-    event BiddingActiveStatusChanged(
+
+    event PaymentProcessed(
+        address indexed paymentRecipient,
+        address indexed paymentSender,
+        uint256 amount,
+        uint256 fees,
+        address indexed paymentToken,
+        address feeCollector
+    );
+
+    event BiddingDeactivatedForListing(
         uint256 indexed tokenId,
-        bool biddingActive,
         address indexed seller
+    );
+
+    event BiddingReactivatedForListing(
+        uint256 indexed tokenId,
+        address indexed seller,
+        uint256 biddingActivationCount,
+        uint256 maxBiddingActivationCount
     );
     event BidPlaced(
         uint256 indexed tokenId,
         address indexed bidder,
-        uint256 amount,
+        uint128 amount,
         address paymentToken
     );
     event AllBidsClearedForProperty(
         uint256 indexed tokenId,
         address indexed clearedBy
+    );
+
+    event BidPruned(
+        uint256 indexed tokenId,
+        address indexed bidder,
+        uint128 amount,
+        string reason
     );
 
     //Errors
@@ -178,14 +201,8 @@ contract PropertyMarket is ReentrancyGuard {
     error ZeroAmount();
     error HighestBidIsHigherThanListingPrice(
         uint256 tokenId,
-        uint256 highestBid,
-        uint256 listingPrice
-    );
-    error OfferPriceTooLow(
-        uint256 tokenId,
-        uint256 offerPrice,
-        uint256 listingPrice,
-        uint256 highestBid
+        uint128 highestBid,
+        uint128 listingPrice
     );
     error NotInPendingSellerConfirmation(
         uint256 tokenId,
@@ -206,7 +223,6 @@ contract PropertyMarket is ReentrancyGuard {
     error NotATopBidder();
     error CannotWithdrawHighestBid();
     error CannotListPropertyDueToNFTNotApproved(uint256 tokenId);
-    error CannotConfirmPurchaseDueToNFTNotApproved();
     error CannotCreatePendingPurchaseDueToInsufficientAllowance(
         address token,
         uint256 settlementPrice,
@@ -217,12 +233,12 @@ contract PropertyMarket is ReentrancyGuard {
     error BidHasChanged(
         address expectedBidder,
         address actualBidder,
-        uint256 expectedAmount,
-        uint256 actualAmount
+        uint128 expectedAmount,
+        uint128 actualAmount
     );
     error NotEnoughAllowanceOrBalanceToPlaceBid(
         address token,
-        uint256 bid,
+        uint128 bid,
         uint256 allowance,
         uint256 balance
     );
@@ -233,6 +249,20 @@ contract PropertyMarket is ReentrancyGuard {
     error EmergencyWithdrawAmountTooHigh();
     error OnlyAdminCanCall();
     error AdminControlMismatch(address passedAdminControl, address onNFT);
+    error MaxBiddingReactivationCountReached(uint256 tokenId);
+    error CallerNotSellerOrBuyer(
+        uint256 tokenId,
+        address caller,
+        address seller,
+        address buyer
+    );
+    error FeeMismatch(uint256 expectedFee, uint256 baseFee);
+    error EmptyTopBid(uint256 tokenId);
+    error InvalidNFTCollection(address token);
+    error UnexpectedERC721Transfer(address from, uint256 tokenId);
+    error BidIsValid(uint256 tokenId, uint256 topBidIndex, address bidder);
+    error OnlyTokenWhitelistManagerCanCall();
+    error NotNftPropertyManager();
 
     //Modifiers
     modifier onlyAdminControlAdmin() {
@@ -240,6 +270,30 @@ contract PropertyMarket is ReentrancyGuard {
             !adminControl.hasRole(adminControl.DEFAULT_ADMIN_ROLE(), msg.sender)
         ) {
             revert OnlyAdminCanCall();
+        }
+        _;
+    }
+
+    modifier onlyNftPropertyManager() {
+        if (
+            !adminControl.hasRole(
+                adminControl.NFT_PROPERTY_MANAGER_ROLE(),
+                msg.sender
+            )
+        ) {
+            revert NotNftPropertyManager();
+        }
+        _;
+    }
+
+    modifier onlyTokenWhitelistManager() {
+        if (
+            !adminControl.hasRole(
+                adminControl.TOKEN_WHITELIST_MANAGER_ROLE(),
+                msg.sender
+            )
+        ) {
+            revert OnlyTokenWhitelistManagerCanCall();
         }
         _;
     }
@@ -302,7 +356,7 @@ contract PropertyMarket is ReentrancyGuard {
     }
 
     //External functions
-    function addAllowedToken(address token) external onlyAdminControlAdmin {
+    function addAllowedToken(address token) external onlyTokenWhitelistManager {
         if (token == address(0)) {
             revert InvalidToken();
         }
@@ -311,7 +365,9 @@ contract PropertyMarket is ReentrancyGuard {
     }
 
     //Only affects new listings, existing listings are not affected.
-    function removeAllowedToken(address token) external onlyAdminControlAdmin {
+    function removeAllowedToken(
+        address token
+    ) external onlyTokenWhitelistManager {
         if (token == address(0)) {
             revert InvalidToken();
         }
@@ -322,9 +378,9 @@ contract PropertyMarket is ReentrancyGuard {
     //Step 1: Listing and unlisting
     function listProperty(
         uint256 tokenId,
-        uint256 price,
+        uint128 price,
         address paymentToken,
-        uint256 confirmationPeriod
+        uint64 confirmationPeriod
     )
         external
         nonReentrant
@@ -354,7 +410,7 @@ contract PropertyMarket is ReentrancyGuard {
 
     function unlistProperty(
         uint256 tokenId
-    ) external onlySellerCanCall(tokenId) {
+    ) external onlyKYCVerified onlySellerCanCall(tokenId) nonReentrant {
         PropertyListing storage listing = listings[tokenId];
         if (listing.status != PropertyStatus.LISTED) {
             revert TokenNotListed(tokenId);
@@ -372,26 +428,32 @@ contract PropertyMarket is ReentrancyGuard {
 
     function updateListingByAdmin(
         uint256 tokenId,
-        uint256 newPrice,
+        uint128 newPrice,
         address newPaymentToken
     )
         external
         onlyNonZeroAmount(newPrice)
         onlyAllowedToken(newPaymentToken)
-        onlyAdminControlAdmin
+        onlyNftPropertyManager
     {
         _updateListing(tokenId, newPrice, newPaymentToken);
     }
 
+    /**
+     * @notice Updates a listing by the seller.
+     * @notice Doesn't need reentrnacy, but it's there to prevent cross-function reentrancy.
+     */
     function updateListingBySeller(
         uint256 tokenId,
-        uint256 newPrice,
+        uint128 newPrice,
         address newPaymentToken
     )
         external
         onlyNonZeroAmount(newPrice)
         onlyAllowedToken(newPaymentToken)
         onlySellerCanCall(tokenId)
+        onlyKYCVerified
+        nonReentrant
     {
         _updateListing(tokenId, newPrice, newPaymentToken);
     }
@@ -400,13 +462,14 @@ contract PropertyMarket is ReentrancyGuard {
 
     //Separate function for accepting the listing price, no bids.
     function purchasePropertyAtListingPrice(
-        uint256 tokenId
+        uint256 tokenId,
+        uint256 expectedFee
     ) external nonReentrant onlyKYCVerified {
         PropertyListing storage listing = listings[tokenId];
         if (listing.status != PropertyStatus.LISTED) {
             revert TokenNotListed(tokenId);
         }
-        uint256 highestBid = listing.highestBid;
+        uint128 highestBid = listing.highestBid;
         if (highestBid > listing.price) {
             //Can no longer do a purchase at listing price, because there is a higher bid, need to go bid.
             revert HighestBidIsHigherThanListingPrice(
@@ -419,7 +482,8 @@ contract PropertyMarket is ReentrancyGuard {
             tokenId,
             listing.price,
             listing.paymentToken,
-            msg.sender
+            msg.sender,
+            expectedFee
         );
     }
 
@@ -429,7 +493,7 @@ contract PropertyMarket is ReentrancyGuard {
     //Currently this is being used for the listing price purchase.
     function confirmPurchase(
         uint256 tokenId
-    ) external nonReentrant onlySellerCanCall(tokenId) {
+    ) external nonReentrant onlySellerCanCall(tokenId) onlyKYCVerified {
         (
             PropertyListing storage listing,
             PendingPurchase storage purchase
@@ -442,10 +506,13 @@ contract PropertyMarket is ReentrancyGuard {
         _processPropertyTokenPayment(
             listing.seller,
             purchase.price,
-            purchase.paymentToken
+            purchase.paymentToken,
+            purchase.fee,
+            purchase.feeCollector
         );
 
         listing.status = PropertyStatus.SOLD;
+        delete pendingPurchases[tokenId];
 
         emit PropertySold(
             tokenId,
@@ -459,7 +526,7 @@ contract PropertyMarket is ReentrancyGuard {
     //Rejects a particular purchase, refunds the tokens, but NOT the NFT because it's back in listed state, awaiting a new sale.
     function rejectPurchase(
         uint256 tokenId
-    ) external onlySellerCanCall(tokenId) nonReentrant {
+    ) external onlySellerCanCall(tokenId) onlyKYCVerified nonReentrant {
         (
             PropertyListing storage listing,
             PendingPurchase storage purchase
@@ -486,10 +553,71 @@ contract PropertyMarket is ReentrancyGuard {
         }
     }
 
+    function pruneInvalidBids(
+        uint256 tokenId,
+        uint256 topBidIndex,
+        address expectedBidder,
+        uint128 expectedAmount
+    )
+        external
+        onlySellerCanCall(tokenId)
+        onlyKYCVerified
+        returns (bool removed)
+    {
+        PropertyListing storage listing = listings[tokenId];
+        if (listing.status != PropertyStatus.LISTED) {
+            revert TokenNotListed(tokenId);
+        }
+        if (topBidIndex >= TOP_BIDS_COUNT) {
+            revert InvalidTopBidIndex(topBidIndex, TOP_BIDS_COUNT - 1);
+        }
+        if (listing.highestBidder == address(0)) {
+            revert NoBidsForToken(tokenId);
+        }
+
+        TopBidCandidate storage topBid = listing.topBids[topBidIndex];
+        if (topBid.bidder == address(0) || topBid.amount == 0) {
+            revert EmptyTopBid(tokenId);
+        }
+
+        // Front-run protection
+        if (
+            topBid.bidder != expectedBidder || topBid.amount != expectedAmount
+        ) {
+            revert BidHasChanged(
+                expectedBidder,
+                topBid.bidder,
+                expectedAmount,
+                topBid.amount
+            );
+        }
+
+        address bidder = topBid.bidder;
+        uint128 amount = topBid.amount;
+        IERC20 paymentToken = IERC20(listing.paymentToken);
+
+        uint256 allowance = paymentToken.allowance(bidder, address(this));
+        if (allowance < amount) {
+            _removeTopBid(tokenId, bidder);
+            emit BidPruned(tokenId, bidder, amount, "low allowance");
+            return true;
+        }
+
+        uint256 balance = paymentToken.balanceOf(bidder);
+        if (balance < amount) {
+            _removeTopBid(tokenId, bidder);
+            emit BidPruned(tokenId, bidder, amount, "low balance");
+            return true;
+        }
+
+        revert BidIsValid(tokenId, topBidIndex, bidder);
+    }
+
     //Step 4: Bidding
 
     /**
      * @notice Places a bid on a listed property, ensuring only one bid per user.
+     * @notice Doesn't need reentrnacy, but it's there to prevent cross-function reentrancy.
      * @dev This function uses a "remove and re-insert" pattern to handle existing
      *      bidders who want to increase their bid. This ensures the `topBids`
      *      array remains sorted and contains unique bidders.
@@ -525,22 +653,21 @@ contract PropertyMarket is ReentrancyGuard {
      */
     function placeBid(
         uint256 tokenId,
-        uint256 bidAmount
-    ) external onlyKYCVerified onlyNonZeroAmount(bidAmount) {
+        uint128 bidAmount
+    ) external onlyKYCVerified onlyNonZeroAmount(bidAmount) nonReentrant {
         PropertyListing storage listing = listings[tokenId];
         IERC20 paymentToken = IERC20(listing.paymentToken);
-
-        if (!listing.biddingActive) {
-            revert BiddingNotActive(tokenId);
-        }
 
         if (listing.status != PropertyStatus.LISTED) {
             revert TokenNotListed(tokenId);
         }
 
-        address currentOwner = manageLifePropertyNFT.ownerOf(tokenId);
-        if (currentOwner == msg.sender) {
-            revert CallerIsSeller(tokenId, msg.sender, currentOwner);
+        if (!listing.biddingActive) {
+            revert BiddingNotActive(tokenId);
+        }
+
+        if (listing.seller == msg.sender) {
+            revert CallerIsSeller(tokenId, msg.sender, listing.seller);
         }
         // Check that the contract is allowed to transfer tokens on behalf of the buyer
         uint256 allowance = paymentToken.allowance(msg.sender, address(this));
@@ -589,7 +716,7 @@ contract PropertyMarket is ReentrancyGuard {
         // Assign the new bid's data to the top slot.
         listing.topBids[0].bidder = msg.sender;
         listing.topBids[0].amount = bidAmount;
-        listing.topBids[0].bidTimestamp = block.timestamp;
+        listing.topBids[0].bidTimestamp = uint64(block.timestamp);
 
         // Update the listing's highest bid information.
         listing.highestBidder = msg.sender;
@@ -598,7 +725,13 @@ contract PropertyMarket is ReentrancyGuard {
         emit BidPlaced(tokenId, msg.sender, bidAmount, listing.paymentToken);
     }
 
-    function withdrawBid(uint256 tokenId) external {
+    /**
+     * @notice Withdraws a bid from a listed property.
+     * @notice Doesn't need reentrnacy, but it's there to prevent cross-function reentrancy.
+     */
+    function withdrawBid(
+        uint256 tokenId
+    ) external nonReentrant onlyKYCVerified {
         PropertyListing storage listing = listings[tokenId];
         if (listing.status != PropertyStatus.LISTED) {
             revert TokenNotListed(tokenId);
@@ -616,16 +749,46 @@ contract PropertyMarket is ReentrancyGuard {
     //Note: This mechanism was implemented to prevent griefing/DOS attacks against the acceptBid function.
     //However, this opens the doors to the seller changing the status to fish for better bids, which could frustrate bidders
     //This is a good tradeoff, but it's importanat to recognize that it gives the seller more power.
-    //Could be made more fair by having the bid status change only be one way, or making it time based.
-    function changeBiddingActiveStatus(
-        uint256 tokenId,
-        bool biddingActive
-    ) external onlySellerCanCall(tokenId) {
+    //I added a max count of re-activations to prevent abuse, and have the seller finally have to accept a bid.
+    //Could be made more fair by having the bid status depend on time.
+    /**
+     * @notice Toggles the bidding active status for a listed property.
+     * @notice Doesn't need reentrnacy, but it's there to prevent cross-function reentrancy.
+     */
+    function toggleBiddingActiveStatus(
+        uint256 tokenId
+    )
+        external
+        onlySellerCanCall(tokenId)
+        nonReentrant
+        onlyKYCVerified
+        returns (bool)
+    {
+        PropertyListing storage listing = listings[tokenId];
         if (listings[tokenId].status != PropertyStatus.LISTED) {
             revert TokenNotListed(tokenId);
         }
-        listings[tokenId].biddingActive = biddingActive;
-        emit BiddingActiveStatusChanged(tokenId, biddingActive, msg.sender);
+
+        if (listing.biddingActive) {
+            listing.biddingActive = false;
+            emit BiddingDeactivatedForListing(tokenId, msg.sender);
+        } else {
+            if (
+                listing.biddingActivationCount >=
+                MAX_TOGGLE_BIDDING_RE_ACTIVATION_COUNT
+            ) {
+                revert MaxBiddingReactivationCountReached(tokenId);
+            }
+            listing.biddingActive = true;
+            listing.biddingActivationCount++;
+            emit BiddingReactivatedForListing(
+                tokenId,
+                msg.sender,
+                listing.biddingActivationCount,
+                MAX_TOGGLE_BIDDING_RE_ACTIVATION_COUNT
+            );
+        }
+        return listing.biddingActive;
     }
 
     //seller calls
@@ -633,8 +796,9 @@ contract PropertyMarket is ReentrancyGuard {
         uint256 tokenId,
         uint256 topBidIndex,
         address expectedBidder,
-        uint256 expectedAmount
-    ) external nonReentrant onlySellerCanCall(tokenId) {
+        uint128 expectedAmount,
+        uint256 expectedFee
+    ) external nonReentrant onlySellerCanCall(tokenId) onlyKYCVerified {
         PropertyListing storage listing = listings[tokenId];
         if (listing.biddingActive) {
             revert BiddingMustNotBeActive(tokenId);
@@ -651,39 +815,58 @@ contract PropertyMarket is ReentrancyGuard {
             revert NoBidsForToken(tokenId);
         }
 
-        TopBidCandidate storage bid = listing.topBids[topBidIndex];
+        TopBidCandidate storage topBid = listing.topBids[topBidIndex];
+
+        if (topBid.bidder == address(0) && topBid.amount == 0) {
+            revert EmptyTopBid(tokenId);
+        }
 
         //Front run protection
-        if (bid.bidder != expectedBidder || bid.amount != expectedAmount) {
+        if (
+            topBid.bidder != expectedBidder || topBid.amount != expectedAmount
+        ) {
             revert BidHasChanged(
                 expectedBidder,
-                bid.bidder,
+                topBid.bidder,
                 expectedAmount,
-                bid.amount
+                topBid.amount
             );
         }
 
         _createPendingPurchase(
             tokenId,
-            bid.amount,
+            topBid.amount,
             listing.paymentToken,
-            bid.bidder
+            topBid.bidder,
+            expectedFee
         );
         listing.biddingActive = false; //Not necessary, but correct.
         emit BidAccepted(
             tokenId,
             listing.seller,
-            bid.bidder,
-            bid.amount,
+            topBid.bidder,
+            topBid.amount,
             listing.paymentToken
         );
     }
 
     //An expired purchase is a purchase that has not been confirmed or rejected within the confirmation period.
     //Puts the token back into listed state, where bids can be placed again.
-    function cancelExpiredPurchase(uint256 tokenId) external nonReentrant {
+    function cancelExpiredPurchase(
+        uint256 tokenId
+    ) external nonReentrant onlyKYCVerified {
         PropertyListing storage listing = listings[tokenId];
         PendingPurchase storage purchase = pendingPurchases[tokenId];
+
+        if (listing.seller != msg.sender && purchase.buyer != msg.sender) {
+            revert CallerNotSellerOrBuyer(
+                tokenId,
+                msg.sender,
+                listing.seller,
+                purchase.buyer
+            );
+        }
+
         if (listing.status != PropertyStatus.PENDING_SELLER_CONFIRMATION) {
             revert NotInPendingSellerConfirmation(tokenId, listing.status);
         }
@@ -696,9 +879,16 @@ contract PropertyMarket is ReentrancyGuard {
                 purchase.confirmationDeadline
             );
         }
+
+        if (listing.price != purchase.price) {
+            //if this purchase is from bidding, remove the bid.
+            _removeTopBid(tokenId, purchase.buyer);
+        }
+
         _refundPendingPurchaseTokens(tokenId); //Undo escrow of the purchase token.
 
         listing.status = PropertyStatus.LISTED; //Back to listed state.
+
         emit PurchaseExpired(
             tokenId,
             purchase.buyer,
@@ -709,11 +899,12 @@ contract PropertyMarket is ReentrancyGuard {
     }
 
     //Admin Emergency functions
+    //TODO: add time lock to this.
     function emergencyWithdrawToken(
         address token,
         uint256 amount,
         address recipient
-    ) external onlyAdminControlAdmin {
+    ) external onlyAdminControlAdmin nonReentrant {
         if (token == address(0)) {
             revert InvalidToken();
         }
@@ -730,14 +921,76 @@ contract PropertyMarket is ReentrancyGuard {
         emit EmergencyTokenWithdrawal(token, recipient, amount);
     }
 
+    //View functions
+
+    function getListingDetails(
+        uint256 tokenId
+    )
+        external
+        view
+        returns (
+            address seller,
+            uint128 price,
+            address paymentToken,
+            PropertyStatus status,
+            uint64 listTimestamp,
+            uint64 confirmationPeriod,
+            bool biddingActive,
+            address highestBidder,
+            uint128 highestBid
+        )
+    {
+        PropertyListing storage listing = listings[tokenId];
+        return (
+            listing.seller,
+            listing.price,
+            listing.paymentToken,
+            listing.status,
+            listing.listTimestamp,
+            listing.confirmationPeriod,
+            listing.biddingActive,
+            listing.highestBidder,
+            listing.highestBid
+        );
+    }
+
+    function getTopBidsForListing(
+        uint256 tokenId
+    ) external view returns (TopBidCandidate[TOP_BIDS_COUNT] memory) {
+        PropertyListing storage listing = listings[tokenId];
+        return listing.topBids;
+    }
+
+    //ERC721Receiver interface
+
+    function onERC721Received(
+        address operator,
+        address from,
+        uint256 tokenId,
+        bytes memory data
+    ) public override(ERC721Holder) returns (bytes4) {
+        // Only accept the managed collection
+        if (msg.sender != address(manageLifePropertyNFT)) {
+            revert InvalidNFTCollection(msg.sender);
+        }
+
+        // Only accept transfers that are part of the controlled listing flow:
+        // _listPropertyWithConfirmation sets these *before* safeTransferFrom.
+        PropertyListing storage listing = listings[tokenId];
+        if (listing.status != PropertyStatus.LISTED || listing.seller != from) {
+            revert UnexpectedERC721Transfer(from, tokenId);
+        }
+
+        return this.onERC721Received.selector;
+    }
+
     //Internal Functions
 
-    //TODO: refactor this into listProperty if we determine we don't need another way to list properties.
     function _listPropertyWithConfirmation(
         uint256 tokenId,
-        uint256 price,
+        uint128 price,
         address paymentToken,
-        uint256 period
+        uint64 period
     ) internal {
         address currentOwner = manageLifePropertyNFT.ownerOf(tokenId);
         if (currentOwner != msg.sender) {
@@ -771,8 +1024,8 @@ contract PropertyMarket is ReentrancyGuard {
         listing.price = price;
         listing.paymentToken = paymentToken;
         listing.status = PropertyStatus.LISTED;
-        listing.listTimestamp = block.timestamp;
-        listing.lastRenewed = block.timestamp;
+        listing.listTimestamp = uint64(block.timestamp);
+        listing.lastRenewed = uint64(block.timestamp);
         listing.confirmationPeriod = period;
         listing.biddingActive = true;
 
@@ -797,23 +1050,30 @@ contract PropertyMarket is ReentrancyGuard {
 
     function _createPendingPurchase(
         uint256 tokenId,
-        uint256 settlementPrice,
+        uint128 settlementPrice,
         address paymentToken,
-        address buyer
+        address buyer,
+        uint256 expectedFee
     ) internal {
         PropertyListing storage listing = listings[tokenId];
         IERC20 token = IERC20(paymentToken);
         listing.status = PropertyStatus.PENDING_SELLER_CONFIRMATION; //Now entering the escrow phase. We can safely escrow the tokens because this is called by the buyer.
         uint256 deadline = block.timestamp + listing.confirmationPeriod;
+        (uint256 baseFee, , address feeCollector) = adminControl.feeConfig(); //Fee should be obtaiend at this stage to prevent malicious changing at settlement time.
+
+        if (baseFee != expectedFee) {
+            revert FeeMismatch(expectedFee, baseFee);
+        }
 
         pendingPurchases[tokenId] = PendingPurchase({
             tokenId: tokenId,
             buyer: buyer,
             price: settlementPrice,
             paymentToken: paymentToken,
-            purchaseTimestamp: block.timestamp,
-            confirmationDeadline: deadline,
-            fundsDeposited: true
+            purchaseTimestamp: uint64(block.timestamp),
+            confirmationDeadline: uint64(deadline),
+            fee: uint64(baseFee),
+            feeCollector: feeCollector
         });
 
         // Check that the contract is allowed to transfer tokens on behalf of the buyer
@@ -833,7 +1093,7 @@ contract PropertyMarket is ReentrancyGuard {
             buyer,
             settlementPrice,
             paymentToken,
-            deadline,
+            uint64(deadline),
             listing.price != settlementPrice // if the price is different from listing price, it's from bidding.
         );
     }
@@ -888,7 +1148,7 @@ contract PropertyMarket is ReentrancyGuard {
         PropertyListing storage listing = listings[tokenId];
 
         uint8 bidIndex = TOP_BIDS_COUNT;
-        uint256 amount = 0;
+        uint128 amount = 0;
         for (uint8 i = 0; i < TOP_BIDS_COUNT; i++) {
             if (listing.topBids[i].bidder == bidder) {
                 bidIndex = i;
@@ -916,22 +1176,24 @@ contract PropertyMarket is ReentrancyGuard {
     //All this does at this point is send the fees to the fee collector and the net value to the seller.
     function _processPropertyTokenPayment(
         address tokenRecipient,
-        uint256 amount,
-        address paymentToken
+        uint128 amount,
+        address paymentToken,
+        uint64 fee,
+        address feeCollector
     ) internal {
-        (uint256 baseFee, , address feeCollector) = adminControl.feeConfig();
-        PaymentProcessor.PaymentConfig memory config = PaymentProcessor
-            .PaymentConfig({
-                baseFee: baseFee,
-                feeCollector: feeCollector,
-                percentageBase: PERCENTAGE_BASE
-            });
+        IERC20 token = IERC20(paymentToken);
+        uint256 fees = (amount * fee) / PERCENTAGE_BASE;
+        uint256 netValue = amount - fees;
 
-        PaymentProcessor.processPayment(
-            config,
+        token.safeTransfer(tokenRecipient, netValue);
+        token.safeTransfer(feeCollector, fees);
+        emit PaymentProcessed(
             tokenRecipient,
+            address(this),
             amount,
-            paymentToken
+            fees,
+            paymentToken,
+            feeCollector
         );
     }
 
@@ -946,11 +1208,9 @@ contract PropertyMarket is ReentrancyGuard {
         );
     }
 
-    //Admin functions TODO: come back to this.
-
     function _updateListing(
         uint256 tokenId,
-        uint256 newPrice,
+        uint128 newPrice,
         address newPaymentToken
     ) internal {
         PropertyListing storage listing = listings[tokenId];
@@ -989,45 +1249,7 @@ contract PropertyMarket is ReentrancyGuard {
             listing.price = newPrice;
         }
 
-        listing.lastRenewed = block.timestamp;
-    }
-
-    function getListingDetails(
-        uint256 tokenId
-    )
-        external
-        view
-        returns (
-            address seller,
-            uint256 price,
-            address paymentToken,
-            PropertyStatus status,
-            uint256 listTimestamp,
-            uint256 confirmationPeriod,
-            bool biddingActive,
-            address highestBidder,
-            uint256 highestBid
-        )
-    {
-        PropertyListing storage listing = listings[tokenId];
-        return (
-            listing.seller,
-            listing.price,
-            listing.paymentToken,
-            listing.status,
-            listing.listTimestamp,
-            listing.confirmationPeriod,
-            listing.biddingActive,
-            listing.highestBidder,
-            listing.highestBid
-        );
-    }
-
-    function getTopBidsForListing(
-        uint256 tokenId
-    ) external view returns (TopBidCandidate[TOP_BIDS_COUNT] memory) {
-        PropertyListing storage listing = listings[tokenId];
-        return listing.topBids;
+        listing.lastRenewed = uint64(block.timestamp);
     }
 
     function _getRequiredBid(
