@@ -5,9 +5,9 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {AdminControl} from "../governance/AdminControl.sol";
 import {IManageLifePropertyNFT} from "../interfaces/IManageLifePropertyNFT.sol";
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
+import {IAdminControl} from "../interfaces/IAdminControl.sol";
 
 /**
  * @title PropertyMarket
@@ -174,7 +174,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     /**
      * @notice The AdminControl contract instance for managing roles, KYC, and fees.
      */
-    AdminControl public adminControl;
+    IAdminControl public adminControl;
     /**
      * @notice Mapping from token ID to the property listing details.
      */
@@ -511,7 +511,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @param _manageLifePropertyNFT The address of the ManageLifePropertyNFT contract.
      * @param _adminControl The address of the AdminControl contract.
      */
-    constructor(IManageLifePropertyNFT _manageLifePropertyNFT, AdminControl _adminControl) {
+    constructor(IManageLifePropertyNFT _manageLifePropertyNFT, IAdminControl _adminControl) {
         if (address(_manageLifePropertyNFT) == address(0)) {
             revert ZeroAddress();
         }
