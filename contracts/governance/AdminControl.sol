@@ -20,6 +20,7 @@ contract AdminControl is AccessControl, Pausable {
     bytes32 public constant REWARD_MANAGER_ROLE = keccak256("REWARD_MANAGER_ROLE");
     bytes32 public constant NFT_PROPERTY_MANAGER_ROLE = keccak256("NFT_PROPERTY_MANAGER_ROLE");
     bytes32 public constant TOKEN_WHITELIST_MANAGER_ROLE = keccak256("TOKEN_WHITELIST_MANAGER_ROLE");
+    bytes32 public constant ERC20_RESCUE_ROLE = keccak256("ERC20_RESCUE_ROLE");
 
     // ========== Constants ==========
     uint256 public constant BASIS_POINTS = 10000; // Base for percentage calculations (100% = 10000, 1% = 100)
@@ -61,6 +62,7 @@ contract AdminControl is AccessControl, Pausable {
         _grantRole(REWARD_MANAGER_ROLE, admin);
         _grantRole(NFT_PROPERTY_MANAGER_ROLE, admin);
         _grantRole(TOKEN_WHITELIST_MANAGER_ROLE, admin);
+        _grantRole(ERC20_RESCUE_ROLE, admin);
     }
 
     constructor(
