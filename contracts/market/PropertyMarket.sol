@@ -5,9 +5,10 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {AdminControl} from "../governance/AdminControl.sol";
 import {IManageLifePropertyNFT} from "../interfaces/IManageLifePropertyNFT.sol";
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
+import {IAdminControl} from "../interfaces/IAdminControl.sol";
+import {RescueERC20Timelock} from "../governance/RescueERC20Timelock.sol";
 
 /**
  * @title PropertyMarket
@@ -29,7 +30,7 @@ import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Hol
  * @dev This contract can be improve by: 1) adding a small bid bond for users to bid with, which can be returned to them under normal circumstances, but can be seized if their bid is not valid during a prune
  * 2) Making the end of bids be time based, not controlled by seller.
  */
-contract PropertyMarket is ReentrancyGuard, ERC721Holder {
+contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
     using SafeERC20 for IERC20;
 
     //Constants and immutable variables
@@ -171,10 +172,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @notice A mapping of ERC20 token addresses that are permitted for use as payment. No rebasing or fee-on-transfer tokens allowed.
      */
     mapping(address => bool) public allowedPaymentTokens;
-    /**
-     * @notice The AdminControl contract instance for managing roles, KYC, and fees.
-     */
-    AdminControl public adminControl;
+
     /**
      * @notice Mapping from token ID to the property listing details.
      */
@@ -399,7 +397,6 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     );
 
     //Errors
-    error ZeroAddress();
     error DirectEthTransferNotAllowed();
     error NotOwnerOfToken(uint256 tokenId, address owner);
     error TokenNotListed(uint256 tokenId);
@@ -446,13 +443,6 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     error MinConfirmationPeriodTooLow(uint256 newMinConfirmationPeriod, uint256 maxConfirmationPeriod);
     error MaxConfirmationPeriodTooLow(uint256 newMaxConfirmationPeriod, uint256 minConfirmationPeriod);
     //Modifiers
-
-    modifier onlyAdminControlAdmin() {
-        if (!adminControl.hasRole(adminControl.DEFAULT_ADMIN_ROLE(), msg.sender)) {
-            revert OnlyAdminCanCall();
-        }
-        _;
-    }
 
     modifier onlyNftPropertyManager() {
         if (!adminControl.hasRole(adminControl.NFT_PROPERTY_MANAGER_ROLE(), msg.sender)) {
@@ -511,7 +501,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @param _manageLifePropertyNFT The address of the ManageLifePropertyNFT contract.
      * @param _adminControl The address of the AdminControl contract.
      */
-    constructor(IManageLifePropertyNFT _manageLifePropertyNFT, AdminControl _adminControl) {
+    constructor(IManageLifePropertyNFT _manageLifePropertyNFT, IAdminControl _adminControl) RescueERC20Timelock(_adminControl){
         if (address(_manageLifePropertyNFT) == address(0)) {
             revert ZeroAddress();
         }
@@ -1098,36 +1088,6 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         uint256 oldMaxToggleBiddingReactivation = maxToggleBiddingReactivation;
         maxToggleBiddingReactivation = newMaxToggleBiddingReactivation;
         emit MaxToggleBiddingReactivationSet(oldMaxToggleBiddingReactivation, newMaxToggleBiddingReactivation);
-    }
-
-    //Admin Emergency functions
-    /**
-     * @notice Allows an admin to withdraw any ERC20 tokens from this contract in an emergency.
-     * @dev This is a failsafe and should be used with extreme caution.
-     * @dev Consider adding a time lock to this function for enhanced security. TODO: we need to add a time lock to this.
-     * @param token The address of the ERC20 token to withdraw.
-     * @param amount The amount of tokens to withdraw.
-     * @param recipient The address to receive the withdrawn tokens.
-     */
-    function emergencyWithdrawToken(address token, uint256 amount, address recipient)
-        external
-        onlyAdminControlAdmin
-        nonReentrant
-    {
-        if (token == address(0)) {
-            revert InvalidToken();
-        }
-        if (recipient == address(0)) {
-            revert ZeroAddress();
-        }
-        IERC20 tokenContract = IERC20(token);
-        if (amount > tokenContract.balanceOf(address(this))) {
-            revert EmergencyWithdrawAmountTooHigh();
-        }
-
-        tokenContract.safeTransfer(recipient, amount);
-
-        emit EmergencyTokenWithdrawal(token, recipient, amount);
     }
 
     //View functions

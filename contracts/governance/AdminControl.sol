@@ -48,12 +48,14 @@ contract AdminControl is AccessControl, Pausable {
     mapping(address => uint256) public communityScores;
     mapping(uint256 => bool) public functionPaused;
 
+    uint256 public erc20RescueDelay;
+
     // ========== Event Definitions ==========
     event FeeConfigUpdated(uint256 oldBaseFee, uint256 newBaseFee, uint256 oldMaxFee, uint256 newMaxFee, address indexed admin);
     event RewardParametersUpdated(uint256 oldBaseRate, uint256 newBaseRate, uint256 oldMultiplier, uint256 newMultiplier, address indexed admin);
     event KYCStatusUpdated(address indexed account, bool approved);
     event CommunityScoreUpdated(address indexed user, uint256 oldScore, uint256 newScore);
-
+    event Erc20RescueDelayUpdated(uint256 oldDelay, uint256 newDelay, address indexed admin);
 
     function _initializeRoles(address admin) internal {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -91,6 +93,8 @@ contract AdminControl is AccessControl, Pausable {
             maxLeaseBonus: 300, // 3% max lease bonus
             rewardsVault: rewardsVault
         });
+
+        erc20RescueDelay = 14 days; //defaults to 14 days, long enough for all sales to finish.
     }
 
     // ========== Fee Management ==========
@@ -112,6 +116,12 @@ contract AdminControl is AccessControl, Pausable {
         feeConfig.feeCollector = newCollector;
         
         emit FeeConfigUpdated(oldBase, newBaseFee, oldMax, feeConfig.maxFee, msg.sender);
+    }
+
+    function updateErc20RescueDelay(uint256 newDelay) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) {
+        uint256 oldDelay = erc20RescueDelay;
+       erc20RescueDelay = newDelay;
+        emit Erc20RescueDelayUpdated(oldDelay, newDelay, msg.sender);
     }
 
     // ========== KYC Management ==========

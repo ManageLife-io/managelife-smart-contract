@@ -8,75 +8,94 @@ import {IAdminControl} from "../interfaces/IAdminControl.sol";
 
 /**
  * @title RescueERC20Timelock
- * @notice Stateful, inheritable timelocked "rescue" (emergency withdrawal) module for ETH (address(0))
- *         and ERC20 tokens. Use it as a base in product contracts (e.g., PropertyMarket).
- *
- *         Flow:
- *           - requestRescue(asset, amount, to, memo) -> queues an op; ETA = now + rescueDelay
- *           - executeRescue(opId)                    -> after ETA; transfers funds
- *           - cancelRescue(opId)                     -> can cancel before execution
- *
- *         Roles are **externalized** via a generic authority (AdminControl-compatible).
- *         Provide your AdminControl address in the constructor and grant these roles there:
- *           RESCUE_REQUESTER_ROLE, RESCUE_EXECUTOR_ROLE, RESCUE_CANCELER_ROLE, RESCUE_PARAM_MANAGER_ROLE
- *
- *         Child contracts may override _beforeRescue/_afterRescue (no-ops by default) to enforce local invariants.
- *         This contract is NON-ABSTRACT and owns its own storage.
+ * @author Jose Herrera
+ * @notice A timelock-based ERC20 token rescue mechanism with role-based access control.
+ * @dev This contract provides a secure way to rescue ERC20 tokens from contracts through
+ *      a time-delayed execution pattern. It is designed to be inherited by any contract
+ *      that holds ERC20 tokens and needs emergency rescue capabilities.
+ * 
+ *      Key Features:
+ *      - Time-delayed execution with configurable delay from AdminControl
+ *      - Role-based access control through AdminControl's ERC20_RESCUE_ROLE
+ *      - Automatic cancellation of rescues that cannot be fulfilled
+ *      - Support for rebasing tokens (no balance validation during queueing)
+ *      - Reentrancy protection on execution
+ *      - Unique operation IDs to prevent replay attacks
+ * 
+ *      Security Considerations:
+ *      - Rebasing tokens are supported in theory but no specific checks are performed
+ *      - Rescues that cannot be fulfilled due to insufficient balance are automatically cancelled
+ *      - Each rescue operation is uniquely identified by asset, amount, recipient, and nonce
+ * 
+ *      Usage:
+ *      This contract should be inherited by any contract that:
+ *      1. Holds ERC20 tokens that might need emergency rescue
+ *      2. Requires time-delayed token recovery mechanisms
+ *      3. Needs role-based access control for token operations
+ * 
  */
 contract RescueERC20Timelock is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Role authority (AdminControl/OZ AccessControl compatible)
-    // ─────────────────────────────────────────────────────────────────────────────
-
-
-    /// @notice Authority used for role checks (e.g., your AdminControl).
-    IRoleAuthority public rescueAuthority;
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Roles to grant in your AdminControl
-    // ─────────────────────────────────────────────────────────────────────────────
-    bytes32 public constant RESCUE_REQUESTER_ROLE     = keccak256("RESCUE_REQUESTER_ROLE");
-    bytes32 public constant RESCUE_EXECUTOR_ROLE      = keccak256("RESCUE_EXECUTOR_ROLE");
-    bytes32 public constant RESCUE_CANCELER_ROLE      = keccak256("RESCUE_CANCELER_ROLE");
-    bytes32 public constant RESCUE_PARAM_MANAGER_ROLE = keccak256("RESCUE_PARAM_MANAGER_ROLE");
+    /// @notice Admin control contract that manages roles and timelock delays
+    /// @dev Used to verify ERC20_RESCUE_ROLE permissions and get rescue delay configuration
+    IAdminControl public adminControl;
 
     // ─────────────────────────────────────────────────────────────────────────────
     // Storage
     // ─────────────────────────────────────────────────────────────────────────────
+    
+    /**
+     * @notice Structure representing a queued rescue operation
+     * @param asset The ERC20 token contract address to rescue from
+     * @param to The recipient address that will receive the rescued tokens
+     * @param amount The amount of tokens to rescue (in token's native decimals)
+     * @param executableAt The timestamp when this operation becomes executable
+     */
     struct RescueOp {
-        address asset;   // address(0) = ETH
+        address asset;
         address to;
         uint256 amount;
-        uint64  eta;     // earliest execution time
-        bool    exists;
+        uint64  executableAt;
     }
 
-    /// @notice Delay applied to new requests (seconds).
-    uint256 public rescueDelay;
-
-    /// @notice Sequential nonce to create unique opIds.
+    /// @notice Sequential nonce to create unique operation IDs
+    /// @dev Incremented for each rescue request to ensure unique opIds across all operations
     uint256 private _rescueNonce;
 
-    /// @notice Queued operations by opId.
+    /// @notice Mapping of operation ID to rescue operation details
+    /// @dev Maps keccak256 hash of (chainid, contract, asset, to, amount, nonce) to RescueOp struct
     mapping(bytes32 => RescueOp) public rescueOps;
 
     // ─────────────────────────────────────────────────────────────────────────────
     // Events
     // ─────────────────────────────────────────────────────────────────────────────
-    event RescueAuthoritySet(address indexed oldAuthority, address indexed newAuthority);
-    event RescueDelaySet(uint256 oldDelay, uint256 newDelay);
 
+    /**
+     * @notice Emitted when a rescue operation is queued
+     * @param opId Unique operation identifier
+     * @param asset ERC20 token address to be rescued
+     * @param to Recipient address for the rescued tokens
+     * @param amount Amount of tokens to rescue (in token's native decimals)
+     * @param executableAt Timestamp when the operation becomes executable
+     * @param memo Optional memo string for off-chain tracking (not used in opId generation)
+     */
     event RescueRequested(
         bytes32 indexed opId,
         address indexed asset,
         address indexed to,
         uint256 amount,
-        uint64  eta,
+        uint64  executableAt,
         string  memo
     );
 
+    /**
+     * @notice Emitted when a rescue operation is successfully executed
+     * @param opId Unique operation identifier that was executed
+     * @param asset ERC20 token address that was rescued
+     * @param to Recipient address that received the tokens
+     * @param amount Amount of tokens that were transferred
+     */
     event RescueExecuted(
         bytes32 indexed opId,
         address indexed asset,
@@ -84,144 +103,193 @@ contract RescueERC20Timelock is ReentrancyGuard {
         uint256 amount
     );
 
+    /**
+     * @notice Emitted when a rescue operation is cancelled
+     * @param opId Unique operation identifier that was cancelled
+     * @param asset ERC20 token address that was supposed to be rescued
+     * @param to Recipient address that would have received the tokens
+     * @param amount Amount of tokens that were supposed to be rescued
+     * @param reason The reason for cancellation (manual or insufficient balance)
+     */
     event RescueCanceled(
         bytes32 indexed opId,
         address indexed asset,
         address indexed to,
-        uint256 amount
+        uint256 amount,
+        RescueCancelReason reason
     );
+
+    /**
+     * @notice Enumeration of possible rescue cancellation reasons
+     * @param NOT_ENOUGH_BALANCE_TO_RESCUE Automatic cancellation due to insufficient token balance
+     * @param MANUAL_CANCEL_BY_RESCUER Manual cancellation by authorized rescuer
+     */
+    enum RescueCancelReason {
+        NOT_ENOUGH_BALANCE_TO_RESCUE,
+        MANUAL_CANCEL_BY_RESCUER
+    }
 
     // ─────────────────────────────────────────────────────────────────────────────
     // Errors
     // ─────────────────────────────────────────────────────────────────────────────
+    
+    /// @notice Thrown when caller lacks required ERC20_RESCUE_ROLE permission
     error Unauthorized();
-    error InvalidAuthority();
-    error InvalidRecipient();
+    
+    /// @notice Thrown when a zero address is provided where a valid address is required
+    error ZeroAddress();
+    
+    /// @notice Thrown when an invalid amount (zero or negative) is provided
     error InvalidAmount();
+    
+    /// @notice Thrown when attempting to create an operation that already exists
     error OpAlreadyExists();
+    
+    /// @notice Thrown when attempting to operate on a non-existent operation ID
     error OpNotFound();
-    error NotReady(uint64 eta);
-    error InsufficientBalance();
+    
+    /// @notice Thrown when attempting to execute an operation before its execution time
+    /// @param executableAt The timestamp when the operation becomes executable
+    error NotReady(uint64 executableAt);
 
     // ─────────────────────────────────────────────────────────────────────────────
     // Constructor
     // ─────────────────────────────────────────────────────────────────────────────
+    
     /**
-     * @param authority  AdminControl/AccessControl authority for roles.
-     * @param delay      Initial timelock delay in seconds.
+     * @notice Initializes the RescueERC20Timelock contract
+     * @param _adminControl The AdminControl contract that manages roles and timelock delays
+     * @dev Sets up the admin control reference for role verification and delay configuration
+     * @custom:throws ZeroAddress if _adminControl is the zero address
      */
-    constructor(IRoleAuthority authority, uint256 delay) {
-        if (address(authority) == address(0)) revert InvalidAuthority();
-        rescueAuthority = authority;
-        rescueDelay = delay;
-        emit RescueAuthoritySet(address(0), address(authority));
-        emit RescueDelaySet(0, delay);
+    constructor(IAdminControl _adminControl) {
+        if (address(_adminControl) == address(0)) revert ZeroAddress();
+        adminControl = _adminControl;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Admin params
-    // ─────────────────────────────────────────────────────────────────────────────
-    function setRescueAuthority(IRoleAuthority newAuthority) external onlyRescueParamManager {
-        if (address(newAuthority) == address(0)) revert InvalidAuthority();
-        address old = address(rescueAuthority);
-        rescueAuthority = newAuthority;
-        emit RescueAuthoritySet(old, address(newAuthority));
-    }
-
-    function setRescueDelay(uint256 newDelay) external onlyRescueParamManager {
-        uint256 old = rescueDelay;
-        rescueDelay = newDelay;
-        emit RescueDelaySet(old, newDelay);
-    }
 
     // ─────────────────────────────────────────────────────────────────────────────
     // Core queue/execute/cancel
     // ─────────────────────────────────────────────────────────────────────────────
     /**
-     * @notice Queue a rescue operation for ETH (asset=address(0)) or an ERC20 token.
-     * @param asset  address(0) for ETH, or ERC20 token address
-     * @param amount amount to rescue
-     * @param to     recipient
-     * @param memo   free-form note for off-chain ops (not used in id)
-     * @return opId  operation identifier
+     * @notice Queue a rescue operation for an ERC20 token with time-delayed execution
+     * @param asset The ERC20 token contract address to rescue tokens from
+     * @param amount The amount of tokens to rescue (in token's native decimals)
+     * @param to The recipient address that will receive the rescued tokens
+     * @param memo Optional memo string for off-chain tracking and identification
+     * @return opId Unique operation identifier for tracking and execution
+     * @dev Creates a time-locked rescue operation that can be executed after the delay period.
+     *      The delay is configured in AdminControl.erc20RescueDelay().
+     *      No balance validation is performed at queueing time, supporting rebasing tokens.
+     *      Operations that cannot be fulfilled will be automatically cancelled during execution.
+     * @custom:throws Unauthorized if caller lacks ERC20_RESCUE_ROLE
+     * @custom:throws ZeroAddress if asset or to address is zero
+     * @custom:throws InvalidAmount if amount is zero
      */
     function requestRescue(address asset, uint256 amount, address to, string calldata memo)
         external
-        onlyRescueRequester
+        onlyRescuer
+        nonReentrant
         returns (bytes32 opId)
     {
-        if (to == address(0)) revert InvalidRecipient();
+        if (to == address(0)) revert ZeroAddress();
         if (amount == 0) revert InvalidAmount();
+        if(asset==address(0)){
+            revert ZeroAddress();
+        }
 
         // compute opId with current nonce to make it unique per request
-        uint256 nextNonce = _rescueNonce + 1;
+        uint256 nextNonce = ++_rescueNonce;
         opId = _computeOpId(asset, amount, to, nextNonce);
 
-        if (rescueOps[opId].exists) revert OpAlreadyExists();
-
-        uint64 eta = uint64(block.timestamp + rescueDelay);
+        uint64 _eta = uint64(block.timestamp + adminControl.erc20RescueDelay());
         rescueOps[opId] = RescueOp({
             asset: asset,
             to: to,
             amount: amount,
-            eta: eta,
-            exists: true
+            executableAt: _eta
         });
 
-        _rescueNonce = nextNonce;
-
-        emit RescueRequested(opId, asset, to, amount, eta, memo);
+        emit RescueRequested(opId, asset, to, amount, _eta, memo);
     }
 
     /**
-     * @notice Execute a queued rescue after its ETA.
+     * @notice Execute a queued rescue operation after its execution time has passed
+     * @param opId The unique operation identifier of the rescue to execute
+     * @dev Executes the rescue if sufficient balance exists, otherwise cancels automatically.
+     *      This approach supports rebasing tokens by checking balance at execution time.
+     *      Uses SafeERC20 for secure token transfers with reentrancy protection.
+     *      The operation is deleted from storage regardless of success or failure.
+     * @custom:throws Unauthorized if caller lacks ERC20_RESCUE_ROLE
+     * @custom:throws OpNotFound if operation ID doesn't exist
+     * @custom:throws NotReady if current timestamp is before executableAt
      */
-    function executeRescue(bytes32 opId) external nonReentrant onlyRescueExecutor {
+    function executeRescue(bytes32 opId) external nonReentrant onlyRescuer {
         RescueOp memory op = rescueOps[opId];
-        if (!op.exists) revert OpNotFound();
-        if (block.timestamp < op.eta) revert NotReady(op.eta);
-
-        _beforeRescue(op.asset, op.amount, op.to);
-
-        if (op.asset == address(0)) {
-            // ETH
-            if (address(this).balance < op.amount) revert InsufficientBalance();
-            (bool ok, ) = payable(op.to).call{value: op.amount}("");
-            require(ok, "ETH transfer failed");
-        } else {
-            // ERC20
+        if (op.asset == address(0)) revert OpNotFound();
+        if (block.timestamp < op.executableAt) revert NotReady(op.executableAt);
+        if(IERC20(op.asset).balanceOf(address(this)) >= op.amount){
             IERC20(op.asset).safeTransfer(op.to, op.amount);
+            emit RescueExecuted(opId, op.asset, op.to, op.amount);
+        }else{//Not enough balance to rescue, auto cancel.
+            emit RescueCanceled(opId, op.asset, op.to, op.amount, RescueCancelReason.NOT_ENOUGH_BALANCE_TO_RESCUE);
         }
-
         delete rescueOps[opId];
-
-        emit RescueExecuted(opId, op.asset, op.to, op.amount);
-
-        _afterRescue(op.asset, op.amount, op.to);
     }
 
     /**
-     * @notice Cancel a queued rescue (anytime before execution).
+     * @notice Manually cancel a queued rescue operation before execution
+     * @param opId The unique operation identifier of the rescue to cancel
+     * @dev Allows authorized rescuers to cancel operations at any time before execution.
+     *      This provides flexibility to handle changed circumstances or incorrect requests.
+     *      The operation is permanently removed from storage and cannot be recovered.
+     * @custom:throws Unauthorized if caller lacks ERC20_RESCUE_ROLE
+     * @custom:throws OpNotFound if operation ID doesn't exist
      */
-    function cancelRescue(bytes32 opId) external onlyRescueCanceler {
+    function cancelRescue(bytes32 opId) external nonReentrant onlyRescuer {
         RescueOp memory op = rescueOps[opId];
-        if (!op.exists) revert OpNotFound();
+        if (op.asset == address(0)) revert OpNotFound();
 
         delete rescueOps[opId];
-        emit RescueCanceled(opId, op.asset, op.to, op.amount);
+        emit RescueCanceled(opId, op.asset, op.to, op.amount, RescueCancelReason.MANUAL_CANCEL_BY_RESCUER);
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
     // Views & helpers
     // ─────────────────────────────────────────────────────────────────────────────
+    
+    /**
+     * @notice Preview the operation ID that would be generated for the next rescue request
+     * @param asset The ERC20 token contract address
+     * @param amount The amount of tokens to rescue
+     * @param to The recipient address
+     * @return The operation ID that would be generated for these parameters
+     * @dev Useful for front-end applications to predict operation IDs before submission
+     */
     function previewOpId(address asset, uint256 amount, address to) external view returns (bytes32) {
         return _computeOpId(asset, amount, to, _rescueNonce + 1);
     }
 
+    /**
+     * @notice Get the current rescue nonce value
+     * @return The current nonce used for generating unique operation IDs
+     * @dev The nonce increments with each rescue request to ensure uniqueness
+     */
     function rescueNonce() external view returns (uint256) {
         return _rescueNonce;
     }
 
+    /**
+     * @notice Internal function to compute a unique operation ID
+     * @param asset The ERC20 token contract address
+     * @param amount The amount of tokens to rescue
+     * @param to The recipient address
+     * @param nonce_ The nonce value to ensure uniqueness
+     * @return The computed operation ID as a keccak256 hash
+     * @dev Creates a unique identifier by hashing chain ID, contract address, 
+     *      operation parameters, and nonce. This prevents replay attacks across
+     *      different chains and contract instances.
+     */
     function _computeOpId(address asset, uint256 amount, address to, uint256 nonce_)
         internal
         view
@@ -233,49 +301,16 @@ contract RescueERC20Timelock is ReentrancyGuard {
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // Hooks (optional overrides in children). No-ops here so contract is non-abstract.
-    // ─────────────────────────────────────────────────────────────────────────────
-    /**
-     * @dev Enforce product-specific safety (e.g., forbid draining escrowed payment tokens while
-     *      there are pending purchases). REVERT to block execution.
-     */
-    function _beforeRescue(address /*asset*/, uint256 /*amount*/, address /*to*/) internal view virtual {}
-
-    /**
-     * @dev Post-transfer hook (e.g., emit product-specific events or sync accounting).
-     */
-    function _afterRescue(address /*asset*/, uint256 /*amount*/, address /*to*/) internal virtual {}
-
-    // ─────────────────────────────────────────────────────────────────────────────
     // Auth
     // ─────────────────────────────────────────────────────────────────────────────
-    modifier onlyRescueRequester() {
-        if (!_isAuthorized(RESCUE_REQUESTER_ROLE, msg.sender)) revert Unauthorized();
+    
+    /**
+     * @notice Modifier to restrict access to authorized rescuers only
+     * @dev Checks if the caller has the ERC20_RESCUE_ROLE through AdminControl
+     * @custom:throws Unauthorized if caller lacks the required role
+     */
+    modifier onlyRescuer() {
+        if (!adminControl.hasRole(adminControl.ERC20_RESCUE_ROLE(), msg.sender)) revert Unauthorized();
         _;
     }
-
-    modifier onlyRescueExecutor() {
-        if (!_isAuthorized(RESCUE_EXECUTOR_ROLE, msg.sender)) revert Unauthorized();
-        _;
-    }
-
-    modifier onlyRescueCanceler() {
-        if (!_isAuthorized(RESCUE_CANCELER_ROLE, msg.sender)) revert Unauthorized();
-        _;
-    }
-
-    modifier onlyRescueParamManager() {
-        if (!_isAuthorized(RESCUE_PARAM_MANAGER_ROLE, msg.sender)) revert Unauthorized();
-        _;
-    }
-
-    function _isAuthorized(bytes32 role, address account) internal view returns (bool) {
-        IRoleAuthority auth = rescueAuthority;
-        return auth.hasRole(role, account) || auth.hasRole(auth.DEFAULT_ADMIN_ROLE(), account);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // Receive ETH (optional: child may override/restrict)
-    // ─────────────────────────────────────────────────────────────────────────────
-    receive() external payable {}
 }
