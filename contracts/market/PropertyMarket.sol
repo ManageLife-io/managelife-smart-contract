@@ -11,7 +11,9 @@ import {IAdminControl} from "../interfaces/IAdminControl.sol";
 /**
  * @title PropertyMarket
  * @author ManageLife
- * @dev A decentralized marketplace for buying, selling properties represented as NFTs, with the ability send and accept offers.
+ * @dev A decentralized marketplace for buying, selling properties represented as NFTs, with the ability to send and accept offers.
+ * @dev Listings have versioning, so that we can validate offers and purchases if the listing is updated, without needing to do deletions.
+ * @dev Versions increments on new listings and each listing update; it’s included in events so indexers/UIs can ignore stale versions.
  */
 contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     using SafeERC20 for IERC20;
@@ -28,17 +30,14 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     struct PropertyListing {
         // slot 0
         uint128 price;
-        uint64  listTimestamp;
-        uint64  lastRenewed;
-
+        uint64 listTimestamp;
+        uint64 lastRenewed;
         // slot 1
-        address seller;            // 20
-        uint64  confirmationPeriod; // 8
-        PropertyStatus status;     // 1
-
+        address seller; // 20
+        uint64 confirmationPeriod; // 8
+        PropertyStatus status; // 1
         // slot 2
-        address paymentToken;      // 20
-
+        address paymentToken; // 20
         // slot 3
         uint256 reviewingOffersUntil; // 32
     }
@@ -72,11 +71,18 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         address feeCollector;
     }
 
+    /**
+     * @notice Represents an offer made by a potential buyer for a property.
+     * @param forListingVersion The version of the listing the offer is for.
+     * @param amount The amount of the offer.
+     * @param validUntil The timestamp until which the offer is valid. If 0, it does not expire.
+     * @param timestamp The timestamp when the offer was made.
+     */
     struct Offer {
         uint256 forListingVersion; // slot 0
-        uint128 amount;            // slot 1 (16)
-        uint64  validUntil;        // slot 1 (8)
-        uint64  timestamp;         // slot 1 (8)
+        uint128 amount; // slot 1 (16)
+        uint64 validUntil; // slot 1 (8)
+        uint64 timestamp; // slot 1 (8)
     }
 
     /**
@@ -173,7 +179,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         address indexed seller,
         uint128 price,
         address paymentToken,
-        uint64  confirmationPeriod,
+        uint64 confirmationPeriod,
         uint256 indexed listingVersion
     );
     /**
@@ -202,6 +208,15 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         uint256 listingVersion
     );
 
+    /**
+     * @notice Emitted when a seller accepts an offer for a property listing.
+     * @param tokenId The ID of the NFT for which the offer was accepted.
+     * @param seller The address of the seller who accepted the offer.
+     * @param offerFrom The address of the user whose offer was accepted.
+     * @param offerAmount The amount of the accepted offer.
+     * @param paymentToken The ERC20 token address used for the offer.
+     * @param forListingVersion The version of the listing the offer was for.
+     */
     event OfferAccepted(
         uint256 indexed tokenId,
         address seller,
@@ -227,6 +242,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @param oldToken The address of the old payment token.
      * @param newToken The address of the new payment token.
      * @param caller The address that initiated the change, can be seller or admin.
+     * @param listingVersion The version of the listing.
      */
     event ListingTokenChanged(
         uint256 indexed tokenId,
@@ -240,7 +256,8 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @param tokenId The ID of the NFT.
      * @param oldPrice The old price.
      * @param newPrice The new price.
-     * @param caller The address that initiated the change.
+     * @param caller The address that initiated the change, can be seller or admin.
+     * @param listingVersion The version of the listing.
      */
     event ListingPriceChanged(
         uint256 indexed tokenId,
@@ -255,11 +272,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @param recipient The address that received the tokens.
      * @param amount The amount of tokens withdrawn.
      */
-    event EmergencyTokenWithdrawal(
-        address indexed token,
-        address indexed recipient,
-        uint256 amount
-    );
+    event EmergencyTokenWithdrawal(address indexed token, address indexed recipient, uint256 amount);
     /**
      * @notice Emitted when a buyer requests to purchase a property.
      * @param tokenId The ID of the NFT.
@@ -268,7 +281,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @param paymentToken The ERC20 token for payment.
      * @param confirmationDeadline The deadline for the seller to confirm.
      * @param purchaseType Tells us if the request is from an offer or from the listing price.
-     * @param fee The fee for the purchase.
+     * @param fee The fee for the purchase, in basis points.
      * @param feeCollector The address that will receive the fees.
      * @param listingVersion The version of the listing.
      */
@@ -279,7 +292,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         address paymentToken,
         uint64 confirmationDeadline,
         PurchaseType purchaseType,
-        uint256  fee,
+        uint256 fee,
         address feeCollector,
         uint256 indexed listingVersion
     );
@@ -304,13 +317,14 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @notice Emitted when a pending purchase expires without seller confirmation.
      * @param tokenId The ID of the NFT.
      * @param buyer The address of the buyer.
-     * @param offerPrice The price that was offered.
+     * @param price The price that was offered.
      * @param paymentToken The ERC20 token for payment.
+     * @param purchaseType Tells us if the request was from an offer or from the listing price.
      */
     event PurchaseExpired(
         uint256 indexed tokenId,
         address indexed buyer,
-        uint128 offerPrice,
+        uint128 price,
         address indexed paymentToken,
         PurchaseType purchaseType
     );
@@ -323,6 +337,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @param fees The amount deducted as protocol fees.
      * @param paymentToken The ERC20 token used for the payment.
      * @param feeCollector The address that received the fees.
+     * @param listingVersion The version of the listing.
      */
     event PaymentProcessed(
         uint256 indexed tokenId,
@@ -334,27 +349,37 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         uint256 listingVersion
     );
 
+    /**
+     * @notice Emitted when a seller ends the reviewing offers period for a listing.
+     * @param tokenId The ID of the NFT.
+     * @param seller The address of the seller.
+     * @param listingVersion The version of the listing.
+     */
     event SellerNoLongerReviewingOffersForListing(
-        uint256 indexed tokenId,
-        address indexed seller,
-        uint256 indexed listingVersion
+        uint256 indexed tokenId, address indexed seller, uint256 indexed listingVersion
     );
 
     /**
-     * @notice Emitted when a seller toggles the reviewing offers status for a listing.
+     * @notice Emitted when a seller triggers the reviewing offers state for a listing.
      * @param tokenId The ID of the NFT.
      * @param seller The address of the seller.
      * @param reviewingOffersUntil The timestamp when the reviewing offers period ends.
      * @param listingVersion The version of the listing.
      */
     event SellerReviewingOffersForListingUntil(
-        uint256 indexed tokenId,
-        address indexed seller,
-        uint256 reviewingOffersUntil,
-        uint256 indexed listingVersion
+        uint256 indexed tokenId, address indexed seller, uint256 reviewingOffersUntil, uint256 indexed listingVersion
     );
 
-
+    /**
+     * @notice Emitted when an offer is placed on a property listing.
+     * @param tokenId The ID of the NFT for which the offer is placed.
+     * @param from The address of the user placing the offer.
+     * @param amount The amount of the offer.
+     * @param paymentToken The ERC20 token address used for the offer.
+     * @param forListingVersion The version of the listing the offer is for.
+     * @param validUntil The timestamp until which the offer is valid.
+     * @param isNewOffer Indicates whether this is a new offer (true) or an update to an existing offer (false).
+     */
     event OfferPlaced(
         uint256 indexed tokenId,
         address indexed from,
@@ -365,11 +390,15 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         bool isNewOffer
     );
 
+    /**
+     * @notice Emitted when an offer is withdrawn by the user.
+     * @param tokenId The ID of the NFT for which the offer was withdrawn.
+     * @param from The address of the user withdrawing the offer.
+     * @param amount The amount of the withdrawn offer.
+     * @param forListingVersion The version of the listing the offer was for.
+     */
     event OfferWithdraw(
-        uint256 indexed tokenId,
-        address indexed from,
-        uint128 amount,
-        uint256 indexed forListingVersion
+        uint256 indexed tokenId, address indexed from, uint128 amount, uint256 indexed forListingVersion
     );
 
     /**
@@ -377,22 +406,26 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @param oldMinConfirmationPeriod The previous minimum period.
      * @param newMinConfirmationPeriod The new minimum period.
      */
-    event MinConfirmationPeriodSet(
-        uint256 oldMinConfirmationPeriod,
-        uint256 newMinConfirmationPeriod
-    );
+    event MinConfirmationPeriodSet(uint256 oldMinConfirmationPeriod, uint256 newMinConfirmationPeriod);
     /**
      * @notice Emitted when the maximum confirmation period is updated.
      * @param oldMaxConfirmationPeriod The previous maximum period.
      * @param newMaxConfirmationPeriod The new maximum period.
      */
-    event MaxConfirmationPeriodSet(
-        uint256 oldMaxConfirmationPeriod,
-        uint256 newMaxConfirmationPeriod
-    );
+    event MaxConfirmationPeriodSet(uint256 oldMaxConfirmationPeriod, uint256 newMaxConfirmationPeriod);
 
+    /**
+     * @notice Emitted when the maximum offer time-to-live (TTL) is updated.
+     * @param oldMaxOfferTTL The previous maximum offer TTL.
+     * @param newMaxOfferTTL The new maximum offer TTL.
+     */
     event MaxOfferTTLSet(uint256 oldMaxOfferTTL, uint256 newMaxOfferTTL);
 
+    /**
+     * @notice Emitted when the offer review period is updated.
+     * @param oldOfferReviewPeriod The previous offer review period.
+     * @param newOfferReviewPeriod The new offer review period.
+     */
     event OfferReviewPeriodSet(uint256 oldOfferReviewPeriod, uint256 newOfferReviewPeriod);
 
     //Errors
@@ -401,45 +434,25 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     error NotOwnerOfToken(uint256 tokenId, address owner);
     error TokenNotListed(uint256 tokenId);
     error RequestedConfirmationPeriodTooLong(uint256 period, uint256 maxPeriod);
-    error RequestedConfirmationPeriodTooShort(
-        uint256 period,
-        uint256 minPeriod
-    );
+    error RequestedConfirmationPeriodTooShort(uint256 period, uint256 minPeriod);
     error NotKYCVerified(address user);
     error NotAllowedToken(address token);
     error ZeroAmount();
-    error NotInPendingSellerConfirmation(
-        uint256 tokenId,
-        PropertyStatus status
-    );
+    error NotInPendingSellerConfirmation(uint256 tokenId, PropertyStatus status);
     error PurchaseNonExistent(uint256 tokenId);
     error CallerNotSeller(uint256 tokenId, address caller, address seller);
-    error PurchaseConfirmationPeriodExpired(
-        uint256 tokenId,
-        uint256 confirmationDeadline
-    );
-    error PurchaseConfirmationPeriodNotExpired(
-        uint256 tokenId,
-        uint256 confirmationDeadline
-    );
+    error PurchaseConfirmationPeriodExpired(uint256 tokenId, uint256 confirmationDeadline);
+    error PurchaseConfirmationPeriodNotExpired(uint256 tokenId, uint256 confirmationDeadline);
     error CallerIsSeller(uint256 tokenId, address caller, address seller);
     error CannotListPropertyDueToNFTNotApproved(uint256 tokenId);
     error CannotCreatePendingPurchaseDueToInsufficientAllowance(
-        address token,
-        uint256 settlementPrice,
-        uint256 allowance
+        address token, uint256 settlementPrice, uint256 allowance
     );
     error CannotCreatePendingPurchaseDueToInsufficientBalance(
-        address token,
-        uint256 settlementPrice,
-        uint256 allowance,
-        uint256 balance
+        address token, uint256 settlementPrice, uint256 allowance, uint256 balance
     );
     error NotEnoughAllowanceOrBalanceToPlaceOffer(
-        address token,
-        uint128 offerAmount,
-        uint256 allowance,
-        uint256 balance
+        address token, uint128 offerAmount, uint256 allowance, uint256 balance
     );
     error OfferHasChanged(uint128 expectedAmount, uint128 actualAmount);
     error OfferExpired(uint256 tokenId, address offerFrom, uint64 expiredAt);
@@ -448,30 +461,16 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     error EmergencyWithdrawAmountTooHigh();
     error OnlyAdminCanCall();
     error AdminControlMismatch(address passedAdminControl, address onNFT);
-    error CallerNotSellerOrBuyer(
-        uint256 tokenId,
-        address caller,
-        address seller,
-        address buyer
-    );
+    error CallerNotSellerOrBuyer(uint256 tokenId, address caller, address seller, address buyer);
     error FeeMismatch(uint256 expectedFee, uint256 baseFee);
     error InvalidNFTCollection(address token);
     error UnexpectedERC721Transfer(address from, uint256 tokenId);
     error OnlyTokenWhitelistManagerCanCall();
     error NotNftPropertyManager();
     error OnlyProtocolParamManagerCanCall();
-    error MinConfirmationPeriodTooHigh(
-        uint256 newMinConfirmationPeriod,
-        uint256 maxConfirmationPeriod
-    );
-    error MaxConfirmationPeriodTooLow(
-        uint256 newMaxConfirmationPeriod,
-        uint256 minConfirmationPeriod
-    );
-    error ListingHasBeenUpdated(
-        uint256 currentListingVersion,
-        uint256 expectedListingVersion
-    );
+    error MinConfirmationPeriodTooHigh(uint256 newMinConfirmationPeriod, uint256 maxConfirmationPeriod);
+    error MaxConfirmationPeriodTooLow(uint256 newMaxConfirmationPeriod, uint256 minConfirmationPeriod);
+    error ListingHasBeenUpdated(uint256 currentListingVersion, uint256 expectedListingVersion);
     error OfferNotFound(uint256 tokenId, address from);
     error PurchaseNotAllowedWhileSellerIsReviewingOffers(uint256 tokenId);
     error NewOfferNotAllowedWhileSellerIsReviewingOffers(uint256 tokenId);
@@ -485,51 +484,49 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     error Unescrowable(uint256 tokenId, address currentOwner);
     //Modifiers
 
+    /**
+     * @dev Throws if called by any account other than the admin of the AdminControl contract.
+     */
     modifier onlyAdminControlAdmin() {
-        if (
-            !adminControl.hasRole(adminControl.DEFAULT_ADMIN_ROLE(), msg.sender)
-        ) {
+        if (!adminControl.hasRole(adminControl.DEFAULT_ADMIN_ROLE(), msg.sender)) {
             revert OnlyAdminCanCall();
         }
         _;
     }
 
+    /**
+     * @dev Throws if called by any account that does not have the NFT_PROPERTY_MANAGER_ROLE.
+     */
     modifier onlyNftPropertyManager() {
-        if (
-            !adminControl.hasRole(
-                adminControl.NFT_PROPERTY_MANAGER_ROLE(),
-                msg.sender
-            )
-        ) {
+        if (!adminControl.hasRole(adminControl.NFT_PROPERTY_MANAGER_ROLE(), msg.sender)) {
             revert NotNftPropertyManager();
         }
         _;
     }
 
+    /**
+     * @dev Throws if called by any account that does not have the PROTOCOL_PARAM_MANAGER_ROLE.
+     */
     modifier onlyProtocolParamManager() {
-        if (
-            !adminControl.hasRole(
-                adminControl.PROTOCOL_PARAM_MANAGER_ROLE(),
-                msg.sender
-            )
-        ) {
+        if (!adminControl.hasRole(adminControl.PROTOCOL_PARAM_MANAGER_ROLE(), msg.sender)) {
             revert OnlyProtocolParamManagerCanCall();
         }
         _;
     }
 
+    /**
+     * @dev Throws if called by any account that does not have the TOKEN_WHITELIST_MANAGER_ROLE.
+     */
     modifier onlyTokenWhitelistManager() {
-        if (
-            !adminControl.hasRole(
-                adminControl.TOKEN_WHITELIST_MANAGER_ROLE(),
-                msg.sender
-            )
-        ) {
+        if (!adminControl.hasRole(adminControl.TOKEN_WHITELIST_MANAGER_ROLE(), msg.sender)) {
             revert OnlyTokenWhitelistManagerCanCall();
         }
         _;
     }
 
+    /**
+     * @dev Throws if the caller is not KYC verified.
+     */
     modifier onlyKYCVerified() {
         if (!adminControl.isKYCVerified(msg.sender)) {
             revert NotKYCVerified(msg.sender);
@@ -537,6 +534,10 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         _;
     }
 
+    /**
+     * @dev Throws if the token is not in the list of allowed payment tokens.
+     * @param token The address of the token to check.
+     */
     modifier onlyAllowedToken(address token) {
         if (!allowedPaymentTokens[token]) {
             revert NotAllowedToken(token);
@@ -544,6 +545,10 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         _;
     }
 
+    /**
+     * @dev Throws if the given amount is zero.
+     * @param amount The amount to check.
+     */
     modifier onlyNonZeroAmount(uint256 amount) {
         if (amount == 0) {
             revert ZeroAmount();
@@ -551,6 +556,10 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         _;
     }
 
+    /**
+     * @dev Throws if the caller is not the seller of the property.
+     * @param tokenId The ID of the NFT.
+     */
     modifier onlySellerCanCall(uint256 tokenId) {
         PropertyListing storage listing = listings[tokenId];
         if (listing.seller != msg.sender) {
@@ -566,10 +575,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @param _manageLifePropertyNFT The address of the ManageLifePropertyNFT contract.
      * @param _adminControl The address of the AdminControl contract.
      */
-    constructor(
-        IManageLifePropertyNFT _manageLifePropertyNFT,
-        IAdminControl _adminControl
-    ) {
+    constructor(IManageLifePropertyNFT _manageLifePropertyNFT, IAdminControl _adminControl) {
         if (address(_manageLifePropertyNFT) == address(0)) {
             revert ZeroAddress();
         }
@@ -619,9 +625,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @dev Can only be called by an account with the TOKEN_WHITELIST_MANAGER_ROLE.
      * @param token The address of the ERC20 token to remove.
      */
-    function removeAllowedToken(
-        address token
-    ) external onlyTokenWhitelistManager {
+    function removeAllowedToken(address token) external onlyTokenWhitelistManager {
         if (token == address(0)) {
             revert InvalidToken();
         }
@@ -633,18 +637,13 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     /**
      * @notice Lists a property for sale on the marketplace.
      * @dev The sender must be the owner of the NFT and have approved this contract to transfer it.
-     * @dev The NFT will be held in escrow by this contract upon successful sale or unlisting.
+     * @dev The NFT is escrowed immediately upon listing and while pending seller confirmation; it’s released to the buyer on sale or returned to the seller on unlisting
      * @param tokenId The ID of the NFT to list.
      * @param price The listing price.
      * @param paymentToken The address of the ERC20 token for payment.
      * @param confirmationPeriod The time in seconds the seller has to confirm a purchase.
      */
-    function listProperty(
-        uint256 tokenId,
-        uint128 price,
-        address paymentToken,
-        uint64 confirmationPeriod
-    )
+    function listProperty(uint256 tokenId, uint128 price, address paymentToken, uint64 confirmationPeriod)
         external
         nonReentrant
         onlyKYCVerified
@@ -652,23 +651,12 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         onlyNonZeroAmount(price)
     {
         if (confirmationPeriod > maxConfirmationPeriod) {
-            revert RequestedConfirmationPeriodTooLong(
-                confirmationPeriod,
-                maxConfirmationPeriod
-            );
+            revert RequestedConfirmationPeriodTooLong(confirmationPeriod, maxConfirmationPeriod);
         }
         if (confirmationPeriod < minConfirmationPeriod) {
-            revert RequestedConfirmationPeriodTooShort(
-                confirmationPeriod,
-                minConfirmationPeriod
-            );
+            revert RequestedConfirmationPeriodTooShort(confirmationPeriod, minConfirmationPeriod);
         }
-        _listPropertyWithConfirmation(
-            tokenId,
-            price,
-            paymentToken,
-            confirmationPeriod
-        );
+        _listPropertyWithConfirmation(tokenId, price, paymentToken, confirmationPeriod);
     }
 
     /**
@@ -677,20 +665,14 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @dev Can only be called by the seller of the property, in the listed state, not in a pending purchase.
      * @param tokenId The ID of the NFT to unlist.
      */
-    function unlistProperty(
-        uint256 tokenId
-    ) external onlyKYCVerified onlySellerCanCall(tokenId) nonReentrant {
+    function unlistProperty(uint256 tokenId) external onlyKYCVerified onlySellerCanCall(tokenId) nonReentrant {
         PropertyListing storage listing = listings[tokenId];
         if (listing.status != PropertyStatus.LISTED) {
             revert TokenNotListed(tokenId);
         }
         listing.status = PropertyStatus.DELISTED;
 
-        manageLifePropertyNFT.safeTransferFrom(
-            address(this),
-            msg.sender,
-            tokenId
-        );
+        manageLifePropertyNFT.safeTransferFrom(address(this), msg.sender, tokenId);
 
         emit PropertyUnlisted(tokenId, msg.sender, listingVersions[tokenId]);
     }
@@ -703,11 +685,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @param newPrice The new listing price.
      * @param newPaymentToken The new ERC20 payment token.
      */
-    function updateListingByAdmin(
-        uint256 tokenId,
-        uint128 newPrice,
-        address newPaymentToken
-    )
+    function updateListingByAdmin(uint256 tokenId, uint128 newPrice, address newPaymentToken)
         external
         onlyNonZeroAmount(newPrice)
         onlyAllowedToken(newPaymentToken)
@@ -724,11 +702,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @param newPrice The new listing price.
      * @param newPaymentToken The new ERC20 payment token.
      */
-    function updateListingBySeller(
-        uint256 tokenId,
-        uint128 newPrice,
-        address newPaymentToken
-    )
+    function updateListingBySeller(uint256 tokenId, uint128 newPrice, address newPaymentToken)
         external
         onlyNonZeroAmount(newPrice)
         onlyAllowedToken(newPaymentToken)
@@ -746,12 +720,13 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @dev This creates a pending purchase and escrows the buyer's funds. The seller must confirm the purchase.
      * @param tokenId The ID of the NFT to purchase.
      * @param expectedFee The expected protocol fee percentage, used for front-run protection.
+     * @param expectedListingVersion The expected version of the listing, for front-run protection.
      */
-    function purchasePropertyAtListingPrice(
-        uint256 tokenId,
-        uint256 expectedFee,
-        uint256 expectedListingVersion
-    ) external nonReentrant onlyKYCVerified {
+    function purchasePropertyAtListingPrice(uint256 tokenId, uint256 expectedFee, uint256 expectedListingVersion)
+        external
+        nonReentrant
+        onlyKYCVerified
+    {
         PropertyListing storage listing = listings[tokenId];
         if (listing.status != PropertyStatus.LISTED) {
             revert TokenNotListed(tokenId);
@@ -761,18 +736,10 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         }
         //Front run protection from listing updates.
         if (expectedListingVersion != listingVersions[tokenId]) {
-            revert ListingHasBeenUpdated(
-                expectedListingVersion,
-                listingVersions[tokenId]
-            );
+            revert ListingHasBeenUpdated(expectedListingVersion, listingVersions[tokenId]);
         }
         _createPendingPurchase(
-            tokenId,
-            listing.price,
-            listing.paymentToken,
-            msg.sender,
-            expectedFee,
-            PurchaseType.LISTING
+            tokenId, listing.price, listing.paymentToken, msg.sender, expectedFee, PurchaseType.LISTING
         );
     }
 
@@ -784,23 +751,14 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @dev Can only be called by the seller before the confirmation period expires.
      * @param tokenId The ID of the NFT being purchased.
      */
-    function confirmPurchase(
-        uint256 tokenId
-    ) external nonReentrant onlySellerCanCall(tokenId) onlyKYCVerified {
-        (
-            PropertyListing storage listing,
-            PendingPurchase storage purchase
-        ) = _performPendingPurchaseChecks(tokenId);
+    function confirmPurchase(uint256 tokenId) external nonReentrant onlySellerCanCall(tokenId) onlyKYCVerified {
+        (PropertyListing storage listing, PendingPurchase storage purchase) = _performPendingPurchaseChecks(tokenId);
 
         //Send the NFT to buyer,  because it's escrowed already.
         _processNFTTransfer(tokenId, purchase.buyer);
 
         //Send escrowed tokens to seller
-        _processPropertyTokenPayment(
-            listing,
-            purchase,
-            tokenId
-        );
+        _processPropertyTokenPayment(listing, purchase, tokenId);
 
         listing.status = PropertyStatus.SOLD;
         delete pendingPurchases[tokenId];
@@ -823,24 +781,13 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @dev Can only be called by the seller (KYC'd) before the confirmation period expires.
      * @param tokenId The ID of the NFT.
      */
-    function rejectPurchase(
-        uint256 tokenId
-    ) external onlySellerCanCall(tokenId) nonReentrant onlyKYCVerified{
-        (
-            PropertyListing storage listing,
-            PendingPurchase storage purchase
-        ) = _performPendingPurchaseChecks(tokenId);
-
+    function rejectPurchase(uint256 tokenId) external onlySellerCanCall(tokenId) nonReentrant onlyKYCVerified {
+        (PropertyListing storage listing, PendingPurchase storage purchase) = _performPendingPurchaseChecks(tokenId);
 
         _refundPendingPurchaseTokens(tokenId); //This undoes the escrow of the purchase token.
 
         emit PurchaseRejected(
-            tokenId,
-            msg.sender,
-            purchase.buyer,
-            purchase.price,
-            purchase.paymentToken,
-            purchase.purchaseType
+            tokenId, msg.sender, purchase.buyer, purchase.price, purchase.paymentToken, purchase.purchaseType
         );
 
         delete pendingPurchases[tokenId]; //Delete the purchase from the pending purchases map.
@@ -848,22 +795,30 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     }
 
     //Step 4: Offers
-    function placeOffer(
-        uint256 tokenId,
-        uint128 offerAmount,
-        uint256 expectedListingVersion,
-        uint64 ttl
-    ) external onlyKYCVerified onlyNonZeroAmount(offerAmount) nonReentrant {
+    /**
+     * @notice Places an offer for a listed property.
+     * @dev The caller must be KYC verified and have sufficient allowance and balance of the payment token.
+     * @dev A new offer cannot be placed while the seller is reviewing offers.
+     * @dev The seller cannot place an offer on their own property.
+     * @dev The offer can be lower or higher than the listing price.
+     * @param tokenId The ID of the NFT to place an offer for.
+     * @param offerAmount The amount of the offer.
+     * @param expectedListingVersion The expected version of the listing, for front-run protection.
+     * @param ttl The time-to-live for the offer in seconds. If 0, the offer does not expire.
+     */
+    function placeOffer(uint256 tokenId, uint128 offerAmount, uint256 expectedListingVersion, uint64 ttl)
+        external
+        onlyKYCVerified
+        onlyNonZeroAmount(offerAmount)
+        nonReentrant
+    {
         PropertyListing storage listing = listings[tokenId];
         IERC20 paymentToken = IERC20(listing.paymentToken);
         uint256 currentListingVersion = listingVersions[tokenId];
 
         //Front run protection
         if (currentListingVersion != expectedListingVersion) {
-            revert ListingHasBeenUpdated(
-                currentListingVersion,
-                expectedListingVersion
-            );
+            revert ListingHasBeenUpdated(currentListingVersion, expectedListingVersion);
         }
 
         if (listing.status != PropertyStatus.LISTED) {
@@ -886,12 +841,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         uint256 allowance = paymentToken.allowance(msg.sender, address(this));
         uint256 balance = paymentToken.balanceOf(msg.sender);
         if (allowance < offerAmount || balance < offerAmount) {
-            revert NotEnoughAllowanceOrBalanceToPlaceOffer(
-                listing.paymentToken,
-                offerAmount,
-                allowance,
-                balance
-            );
+            revert NotEnoughAllowanceOrBalanceToPlaceOffer(listing.paymentToken, offerAmount, allowance, balance);
         }
 
         Offer storage offer = offers[tokenId][msg.sender];
@@ -902,8 +852,8 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         if (ttl > 0) {
             uint256 exp = block.timestamp + ttl;
             if (exp > type(uint64).max) {
-                offer.validUntil = 0;//Admin has set up a very high max ttl, so we can't use it, default to 0.
-            }else{
+                offer.validUntil = 0; //Admin has set up a very high max ttl, so we can't use it, default to 0.
+            } else {
                 offer.validUntil = uint64(exp);
             }
         } else {
@@ -921,24 +871,29 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         );
     }
 
+    /**
+     * @notice Withdraws an offer made by the caller for a property.
+     * @dev An offer can be withdrawn at any time before it is accepted.
+     * @param tokenId The ID of the NFT for which the offer was made.
+     */
     //Can withdraw offer in any state, it's just cleanup.
     function withdrawOffer(uint256 tokenId) external nonReentrant {
         Offer storage offer = offers[tokenId][msg.sender];
         if (offer.timestamp == 0) {
             revert OfferNotFound(tokenId, msg.sender);
         }
-        emit OfferWithdraw(
-            tokenId,
-            msg.sender,
-            offer.amount,
-            offer.forListingVersion
-        );
+        emit OfferWithdraw(tokenId, msg.sender, offer.amount, offer.forListingVersion);
         delete offers[tokenId][msg.sender];
     }
 
-    function toggleReviewingOffersStatus(
-        uint256 tokenId
-    )
+    /**
+     * @notice Allows the seller to enter a state of reviewing offers for a property.
+     * @dev When in this state, no new offers or "buy it now" purchases can be made.
+     * @dev This state lasts for the duration of the offer review period, offerReviewPeriod, then it turns off automatically.
+     * @dev The seller can accept an offer during this period.
+     * @param tokenId The ID of the NFT.
+     */
+    function startReviewingOffersStatus(uint256 tokenId)
         external
         onlySellerCanCall(tokenId)
         nonReentrant
@@ -949,35 +904,50 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
             revert TokenNotListed(tokenId);
         }
 
-        if(block.timestamp <= listing.reviewingOffersUntil){
+        if (block.timestamp <= listing.reviewingOffersUntil) {
             revert SellerAlreadyReviewingOffers(tokenId, msg.sender, listing.reviewingOffersUntil);
         }
 
-       
         listing.reviewingOffersUntil = block.timestamp + offerReviewPeriod;
-        emit SellerReviewingOffersForListingUntil(tokenId, msg.sender, listing.reviewingOffersUntil, listingVersions[tokenId]);   
+        emit SellerReviewingOffersForListingUntil(
+            tokenId, msg.sender, listing.reviewingOffersUntil, listingVersions[tokenId]
+        );
     }
 
-    function stopReviewingOffers(
-        uint256 tokenId
-    ) external onlySellerCanCall(tokenId) nonReentrant onlyKYCVerified {
+    /**
+     * @notice Allows the seller to exit the state of reviewing offers.
+     * @dev This allows new offers and "buy it now" purchases to be made again.
+     * @param tokenId The ID of the NFT.
+     */
+    function stopReviewingOffers(uint256 tokenId) external onlySellerCanCall(tokenId) nonReentrant onlyKYCVerified {
         PropertyListing storage listing = listings[tokenId];
         if (listing.status != PropertyStatus.LISTED) {
             revert TokenNotListed(tokenId);
         }
-        if(block.timestamp > listing.reviewingOffersUntil){
+        if (block.timestamp > listing.reviewingOffersUntil) {
             revert SellerNotReviewingOffers(tokenId, msg.sender, listing.reviewingOffersUntil);
         }
         listing.reviewingOffersUntil = 0;
         emit SellerNoLongerReviewingOffersForListing(tokenId, msg.sender, listingVersions[tokenId]);
     }
 
-    function acceptOffer(
-        uint256 tokenId,
-        address offerFrom,
-        uint128 expectedOfferAmount,
-        uint256 expectedFee
-    ) external nonReentrant onlySellerCanCall(tokenId) onlyKYCVerified {
+    /**
+     * @notice Accepts an offer for a property.
+     * @dev Can only be called by the seller while the listing is in the "reviewing offers" state, for front-run protection.
+     * @dev The offer must be valid (not expired) and for the current listing version.
+     * @dev The offerer must be KYC verified.
+     * @dev This creates a pending purchase, which the seller must then confirm.
+     * @param tokenId The ID of the NFT.
+     * @param offerFrom The address of the user who made the offer.
+     * @param expectedOfferAmount The expected amount of the offer, for front-run protection.
+     * @param expectedFee The expected protocol fee, for front-run protection.
+     */
+    function acceptOffer(uint256 tokenId, address offerFrom, uint128 expectedOfferAmount, uint256 expectedFee)
+        external
+        nonReentrant
+        onlySellerCanCall(tokenId)
+        onlyKYCVerified
+    {
         PropertyListing storage listing = listings[tokenId];
         if (block.timestamp >= listing.reviewingOffersUntil) {
             revert MustBeReviewingOffersToAcceptOffer(tokenId);
@@ -995,10 +965,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         }
 
         if (offer.forListingVersion != listingVersions[tokenId]) {
-            revert ListingHasBeenUpdated(
-                listingVersions[tokenId],
-                offer.forListingVersion
-            );
+            revert ListingHasBeenUpdated(listingVersions[tokenId], offer.forListingVersion);
         }
 
         if (!adminControl.isKYCVerified(offerFrom)) {
@@ -1010,25 +977,11 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
             revert OfferHasChanged(expectedOfferAmount, offer.amount);
         }
 
-        _createPendingPurchase(
-            tokenId,
-            offer.amount,
-            listing.paymentToken,
-            offerFrom,
-            expectedFee,
-            PurchaseType.OFFER
-        );
+        _createPendingPurchase(tokenId, offer.amount, listing.paymentToken, offerFrom, expectedFee, PurchaseType.OFFER);
         uint128 offerAmount = offer.amount;
         uint256 forListingVersion = offer.forListingVersion;
         delete offers[tokenId][offerFrom]; //Delete the offer, has been accepted and processed.
-        emit OfferAccepted(
-            tokenId,
-            listing.seller,
-            offerFrom,
-            offerAmount,
-            listing.paymentToken,
-            forListingVersion
-        );
+        emit OfferAccepted(tokenId, listing.seller, offerFrom, offerAmount, listing.paymentToken, forListingVersion);
     }
 
     /**
@@ -1038,19 +991,12 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @dev Non-KYC in the case that the buyer or seller become non KYC'd, at least they can always cancel the expired purchase.
      * @param tokenId The ID of the NFT with the expired purchase.
      */
-    function cancelExpiredPurchase(
-        uint256 tokenId
-    ) external nonReentrant {
+    function cancelExpiredPurchase(uint256 tokenId) external nonReentrant {
         PropertyListing storage listing = listings[tokenId];
         PendingPurchase storage purchase = pendingPurchases[tokenId];
 
         if (listing.seller != msg.sender && purchase.buyer != msg.sender) {
-            revert CallerNotSellerOrBuyer(
-                tokenId,
-                msg.sender,
-                listing.seller,
-                purchase.buyer
-            );
+            revert CallerNotSellerOrBuyer(tokenId, msg.sender, listing.seller, purchase.buyer);
         }
 
         if (listing.status != PropertyStatus.PENDING_SELLER_CONFIRMATION) {
@@ -1060,23 +1006,14 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
             revert PurchaseNonExistent(tokenId);
         }
         if (block.timestamp <= purchase.confirmationDeadline) {
-            revert PurchaseConfirmationPeriodNotExpired(
-                tokenId,
-                purchase.confirmationDeadline
-            );
+            revert PurchaseConfirmationPeriodNotExpired(tokenId, purchase.confirmationDeadline);
         }
 
         _refundPendingPurchaseTokens(tokenId); //Undo escrow of the purchase token.
 
         listing.status = PropertyStatus.LISTED; //Back to listed state.
 
-        emit PurchaseExpired(
-            tokenId,
-            purchase.buyer,
-            purchase.price,
-            purchase.paymentToken,
-            purchase.purchaseType
-        );
+        emit PurchaseExpired(tokenId, purchase.buyer, purchase.price, purchase.paymentToken, purchase.purchaseType);
         delete pendingPurchases[tokenId]; //Delete the purchase from the pending purchases map.
     }
 
@@ -1086,24 +1023,17 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @dev Can only be called by an account with the PROTOCOL_PARAM_MANAGER_ROLE.
      * @param newMinConfirmationPeriod The new minimum period in seconds.
      */
-    function setMinConfirmationPeriod(
-        uint256 newMinConfirmationPeriod
-    ) external onlyProtocolParamManager {
-        if (newMinConfirmationPeriod == 0) {
-            revert ZeroAmount();
-        }
+    function setMinConfirmationPeriod(uint256 newMinConfirmationPeriod)
+        external
+        onlyProtocolParamManager
+        onlyNonZeroAmount(newMinConfirmationPeriod)
+    {
         if (newMinConfirmationPeriod > maxConfirmationPeriod) {
-            revert MinConfirmationPeriodTooHigh(
-                newMinConfirmationPeriod,
-                maxConfirmationPeriod
-            );
+            revert MinConfirmationPeriodTooHigh(newMinConfirmationPeriod, maxConfirmationPeriod);
         }
         uint256 oldMinConfirmationPeriod = minConfirmationPeriod;
         minConfirmationPeriod = newMinConfirmationPeriod;
-        emit MinConfirmationPeriodSet(
-            oldMinConfirmationPeriod,
-            newMinConfirmationPeriod
-        );
+        emit MinConfirmationPeriodSet(oldMinConfirmationPeriod, newMinConfirmationPeriod);
     }
 
     /**
@@ -1111,40 +1041,41 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @dev Can only be called by an account with the PROTOCOL_PARAM_MANAGER_ROLE.
      * @param newMaxConfirmationPeriod The new maximum period in seconds.
      */
-    function setMaxConfirmationPeriod(
-        uint256 newMaxConfirmationPeriod
-    ) external onlyProtocolParamManager {
+    function setMaxConfirmationPeriod(uint256 newMaxConfirmationPeriod) external onlyProtocolParamManager {
         if (newMaxConfirmationPeriod < minConfirmationPeriod) {
-            revert MaxConfirmationPeriodTooLow(
-                newMaxConfirmationPeriod,
-                minConfirmationPeriod
-            );
+            revert MaxConfirmationPeriodTooLow(newMaxConfirmationPeriod, minConfirmationPeriod);
         }
         uint256 oldMaxConfirmationPeriod = maxConfirmationPeriod;
         maxConfirmationPeriod = newMaxConfirmationPeriod;
-        emit MaxConfirmationPeriodSet(
-            oldMaxConfirmationPeriod,
-            newMaxConfirmationPeriod
-        );
+        emit MaxConfirmationPeriodSet(oldMaxConfirmationPeriod, newMaxConfirmationPeriod);
     }
 
-    function setMaxOfferTTL(
-        uint256 newMaxOfferTTL
-    ) external onlyProtocolParamManager {
-        if (newMaxOfferTTL == 0) {
-            revert ZeroAmount();
-        }
+    /**
+     * @notice Sets the maximum time-to-live for new offers.
+     * @dev Can only be called by an account with the PROTOCOL_PARAM_MANAGER_ROLE.
+     * @param newMaxOfferTTL The new maximum TTL in seconds.
+     */
+    function setMaxOfferTTL(uint256 newMaxOfferTTL)
+        external
+        onlyProtocolParamManager
+        onlyNonZeroAmount(newMaxOfferTTL)
+    {
         uint256 oldMaxOfferTTL = maxOfferTTL;
         maxOfferTTL = newMaxOfferTTL;
         emit MaxOfferTTLSet(oldMaxOfferTTL, newMaxOfferTTL);
     }
 
-    function setOfferReviewPeriod(
-        uint256 newOfferReviewPeriod
-    ) external onlyProtocolParamManager {
-        if(newOfferReviewPeriod == 0){
-            revert ZeroAmount();
-        }
+    /**
+     * @notice Sets the duration for the offer review period.
+     * @dev Can only be called by an account with the PROTOCOL_PARAM_MANAGER_ROLE.
+     * @dev This should be long enough to allow the seller to review offers and accept or reject them.
+     * @param newOfferReviewPeriod The new duration in seconds.
+     */
+    function setOfferReviewPeriod(uint256 newOfferReviewPeriod)
+        external
+        onlyProtocolParamManager
+        onlyNonZeroAmount(newOfferReviewPeriod)
+    {
         uint256 oldOfferReviewPeriod = offerReviewPeriod;
         offerReviewPeriod = newOfferReviewPeriod;
         emit OfferReviewPeriodSet(oldOfferReviewPeriod, newOfferReviewPeriod);
@@ -1159,11 +1090,11 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @param amount The amount of tokens to withdraw.
      * @param recipient The address to receive the withdrawn tokens.
      */
-    function emergencyWithdrawToken(
-        address token,
-        uint256 amount,
-        address recipient
-    ) external onlyAdminControlAdmin nonReentrant {
+    function emergencyWithdrawToken(address token, uint256 amount, address recipient)
+        external
+        onlyAdminControlAdmin
+        nonReentrant
+    {
         if (token == address(0)) {
             revert InvalidToken();
         }
@@ -1193,9 +1124,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @return confirmationPeriod The confirmation period in seconds.
      * @return reviewingOffersUntil The timestamp until which the seller is reviewing offers.
      */
-    function getListingDetails(
-        uint256 tokenId
-    )
+    function getListingDetails(uint256 tokenId)
         external
         view
         returns (
@@ -1234,7 +1163,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     // solhint-disable-next-line func-mutability
     function onERC721Received(
         address,
-        /* operator */ 
+        /* operator */
         address from,
         uint256 tokenId,
         bytes memory /* data */
@@ -1290,12 +1219,9 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      *      - Transfers NFT from owner to this contract (escrow)
      *      - Emits NewListing event
      */
-    function _listPropertyWithConfirmation(
-        uint256 tokenId,
-        uint128 price,
-        address paymentToken,
-        uint64 period
-    ) internal {
+    function _listPropertyWithConfirmation(uint256 tokenId, uint128 price, address paymentToken, uint64 period)
+        internal
+    {
         address currentOwner = manageLifePropertyNFT.ownerOf(tokenId);
         uint256 currentVersion = listingVersions[tokenId];
         if (currentOwner != msg.sender) {
@@ -1304,7 +1230,10 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         PropertyListing storage existingListing = listings[tokenId];
 
         // Should never happen. The NFT is escrowed, so it cannot be listed twice.
-        if(existingListing.status == PropertyStatus.LISTED || existingListing.status == PropertyStatus.PENDING_SELLER_CONFIRMATION){
+        if (
+            existingListing.status == PropertyStatus.LISTED
+                || existingListing.status == PropertyStatus.PENDING_SELLER_CONFIRMATION
+        ) {
             revert CannotListInCurrentState(tokenId, existingListing.status);
         }
 
@@ -1331,10 +1260,8 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         listing.confirmationPeriod = period;
 
         if (
-            !manageLifePropertyNFT.isApprovedForAll(
-                msg.sender,
-                address(this)
-            ) && manageLifePropertyNFT.getApproved(tokenId) != address(this)
+            !manageLifePropertyNFT.isApprovedForAll(msg.sender, address(this))
+                && manageLifePropertyNFT.getApproved(tokenId) != address(this)
         ) {
             revert CannotListPropertyDueToNFTNotApproved(tokenId);
         }
@@ -1343,11 +1270,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         listingVersions[tokenId] = currentVersion + 1;
 
         // Move the NFT to this contract (escrow) when listing
-        manageLifePropertyNFT.safeTransferFrom(
-            msg.sender,
-            address(this),
-            tokenId
-        );
+        manageLifePropertyNFT.safeTransferFrom(msg.sender, address(this), tokenId);
 
         emit NewListing(tokenId, msg.sender, price, paymentToken, period, listingVersions[tokenId]);
     }
@@ -1393,7 +1316,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     ) internal {
         PropertyListing storage listing = listings[tokenId];
         IERC20 token = IERC20(paymentToken);
-        (uint256 baseFee, , address feeCollector) = adminControl.feeConfig(); //Fee should be obtaiend at this stage to prevent malicious changing at settlement time.
+        (uint256 baseFee,, address feeCollector) = adminControl.feeConfig(); //Fee should be fetched at this stage to prevent malicious changing at settlement time.
 
         if (baseFee != expectedFee) {
             revert FeeMismatch(expectedFee, baseFee);
@@ -1404,18 +1327,11 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
 
         if (balance < settlementPrice) {
             revert CannotCreatePendingPurchaseDueToInsufficientBalance(
-                address(token),
-                settlementPrice,
-                allowance,
-                balance
+                address(token), settlementPrice, allowance, balance
             );
         }
         if (allowance < settlementPrice) {
-            revert CannotCreatePendingPurchaseDueToInsufficientAllowance(
-                address(token),
-                settlementPrice,
-                allowance
-            );
+            revert CannotCreatePendingPurchaseDueToInsufficientAllowance(address(token), settlementPrice, allowance);
         }
         uint256 deadline = block.timestamp + listing.confirmationPeriod;
         pendingPurchases[tokenId] = PendingPurchase({
@@ -1464,15 +1380,10 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      *      - This contract must own the NFT (in escrow)
      *      - Current timestamp must be within the confirmation deadline
      */
-    function _performPendingPurchaseChecks(
-        uint256 tokenId
-    )
+    function _performPendingPurchaseChecks(uint256 tokenId)
         internal
         view
-        returns (
-            PropertyListing storage listing,
-            PendingPurchase storage purchase
-        )
+        returns (PropertyListing storage listing, PendingPurchase storage purchase)
     {
         listing = listings[tokenId];
         purchase = pendingPurchases[tokenId];
@@ -1489,15 +1400,12 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
 
         //Should never happen, as the token is supposed to be escrowed in this contract.
         address currentOwner = manageLifePropertyNFT.ownerOf(tokenId);
-        if(currentOwner != address(this)){
+        if (currentOwner != address(this)) {
             revert Unescrowable(tokenId, currentOwner);
         }
 
         if (block.timestamp > purchase.confirmationDeadline) {
-            revert PurchaseConfirmationPeriodExpired(
-                tokenId,
-                purchase.confirmationDeadline
-            );
+            revert PurchaseConfirmationPeriodExpired(tokenId, purchase.confirmationDeadline);
         }
         return (listing, purchase);
     }
@@ -1522,7 +1430,6 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @param purchase The purchase object.
      * @param tokenId The ID of the NFT.
      */
-
     function _processPropertyTokenPayment(
         PropertyListing storage listing,
         PendingPurchase storage purchase,
@@ -1562,19 +1469,17 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      */
     function _processNFTTransfer(uint256 tokenId, address buyer) internal {
         // NFT is escrowed, transfer it from escrow to the buyer
-        manageLifePropertyNFT.safeTransferFrom(
-            address(this),
-            buyer,
-            tokenId,
-            ""
-        );
+        manageLifePropertyNFT.safeTransferFrom(address(this), buyer, tokenId, "");
     }
 
-    function _updateListing(
-        uint256 tokenId,
-        uint128 newPrice,
-        address newPaymentToken
-    ) internal {
+    /**
+     * @notice Internal function to update a listing's price and/or payment token.
+     * @dev This will invalidate all existing offers on the property by incrementing the listing version.
+     * @param tokenId The ID of the NFT to update.
+     * @param newPrice The new listing price.
+     * @param newPaymentToken The new ERC20 payment token.
+     */
+    function _updateListing(uint256 tokenId, uint128 newPrice, address newPaymentToken) internal {
         uint256 currentVersion = listingVersions[tokenId];
         PropertyListing storage listing = listings[tokenId];
         if (listing.status != PropertyStatus.LISTED) {
@@ -1583,30 +1488,16 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         if (block.timestamp < listing.reviewingOffersUntil) {
             revert UpdateNotAllowedWhileSellerIsReviewingOffers(tokenId);
         }
-        if (
-            listing.paymentToken == newPaymentToken && listing.price == newPrice
-        ) {
+        if (listing.paymentToken == newPaymentToken && listing.price == newPrice) {
             revert ListingNotChanged(tokenId);
         }
 
         if (listing.paymentToken != newPaymentToken) {
-            emit ListingTokenChanged(
-                tokenId,
-                listing.paymentToken,
-                newPaymentToken,
-                msg.sender,
-                currentVersion+1
-            );
+            emit ListingTokenChanged(tokenId, listing.paymentToken, newPaymentToken, msg.sender, currentVersion + 1);
             listing.paymentToken = newPaymentToken;
         }
         if (listing.price != newPrice) {
-            emit ListingPriceChanged(
-                tokenId,
-                listing.price,
-                newPrice,
-                msg.sender,
-                currentVersion+1
-            );
+            emit ListingPriceChanged(tokenId, listing.price, newPrice, msg.sender, currentVersion + 1);
             listing.price = newPrice;
         }
         listingVersions[tokenId] = currentVersion + 1;
