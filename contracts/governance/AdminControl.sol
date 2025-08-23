@@ -14,6 +14,11 @@ contract AdminControl is AccessControl, Pausable {
     event AdminRoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
     using EnumerableSet for EnumerableSet.AddressSet;
     
+    error GlobalPause();
+    error FunctionPaused(bytes32 functionId);
+    error ZeroAddress();
+    error ExceedsMaxFee(uint256 maxFee);
+
     // ========== Role Definitions ==========
     bytes32 public constant PROTOCOL_PARAM_MANAGER_ROLE = keccak256("PROTOCOL_PARAM_MANAGER_ROLE");
     bytes32 public constant KYC_ROLE = keccak256("KYC_ROLE");
@@ -45,23 +50,22 @@ contract AdminControl is AccessControl, Pausable {
     RewardParameters public rewardParams;
     
     EnumerableSet.AddressSet private _kycVerified;
-    mapping(address => uint256) public communityScores;
-    mapping(uint256 => bool) public functionPaused;
+    mapping(bytes32 => bool) public functionPaused;
 
+    
+    /// @notice The minimum delay (in seconds) before ERC20 rescue operations can be executed.
+    /// @dev This is set to ensure that funds cannot be withdrawn prematurely, protecting users during ongoing sales.
     uint256 public erc20RescueDelay;
 
     // ========== Event Definitions ==========
     event FeeConfigUpdated(uint256 oldBaseFee, uint256 newBaseFee, uint256 oldMaxFee, uint256 newMaxFee, address indexed admin);
-    event RewardParametersUpdated(uint256 oldBaseRate, uint256 newBaseRate, uint256 oldMultiplier, uint256 newMultiplier, address indexed admin);
     event KYCStatusUpdated(address indexed account, bool approved);
-    event CommunityScoreUpdated(address indexed user, uint256 oldScore, uint256 newScore);
     event Erc20RescueDelayUpdated(uint256 oldDelay, uint256 newDelay, address indexed admin);
 
     function _initializeRoles(address admin) internal {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(PROTOCOL_PARAM_MANAGER_ROLE, admin);
         _grantRole(KYC_ROLE, admin);
-        _grantRole(REWARD_MANAGER_ROLE, admin);
         _grantRole(NFT_PROPERTY_MANAGER_ROLE, admin);
         _grantRole(TOKEN_WHITELIST_MANAGER_ROLE, admin);
         _grantRole(ERC20_RESCUE_ROLE, admin);
@@ -69,12 +73,14 @@ contract AdminControl is AccessControl, Pausable {
 
     constructor(
         address initialAdmin,
-        address feeCollector,
-        address rewardsVault
+        address feeCollector
     ) {
-        require(feeCollector != address(0), "Invalid fee collector address");
-        require(rewardsVault != address(0), "Invalid rewards vault address");
-        require(initialAdmin != address(0), "Invalid admin address");
+        if(feeCollector == address(0)) {
+            revert ZeroAddress();
+        }
+        if(initialAdmin == address(0)) {
+            revert ZeroAddress();
+        }
         
         // Initialize role assignments
         _initializeRoles(initialAdmin);
@@ -86,28 +92,24 @@ contract AdminControl is AccessControl, Pausable {
             feeCollector: feeCollector
         });
 
-        // Initialize reward parameters
-        rewardParams = RewardParameters({
-            baseRate: 1000,     // 10% base reward
-            communityMultiplier: 2000, // 20% max community bonus
-            maxLeaseBonus: 300, // 3% max lease bonus
-            rewardsVault: rewardsVault
-        });
-
         erc20RescueDelay = 14 days; //defaults to 14 days, long enough for all sales to finish.
     }
 
     // ========== Fee Management ==========
-    /// @notice Updates the fee configuration for the system
-    /// @dev Only callable by accounts with OPERATOR_ROLE
+    /// @notice Updates the fee configuration for the propertyMarket Contract
+    /// @dev Only callable by accounts with PROTOCOL_PARAM_MANAGER_ROLE
     /// @param newBaseFee New base fee rate in basis points (100 = 1%)
     /// @param newCollector New address to collect fees
     function updateFeeConfig(
         uint256 newBaseFee, 
         address newCollector
     ) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) {
-        require(newCollector != address(0), "Invalid fee collector address");
-        require(newBaseFee <= feeConfig.maxFee, "Exceeds max fee");
+        if(newCollector == address(0)) {
+            revert ZeroAddress();
+        }
+        if(newBaseFee > feeConfig.maxFee) {
+            revert ExceedsMaxFee(feeConfig.maxFee);
+        }
         
         uint256 oldBase = feeConfig.baseFee;
         uint256 oldMax = feeConfig.maxFee;
@@ -118,6 +120,9 @@ contract AdminControl is AccessControl, Pausable {
         emit FeeConfigUpdated(oldBase, newBaseFee, oldMax, feeConfig.maxFee, msg.sender);
     }
 
+    /// @notice Updates the delay for the erc20 rescue function in the propertyMarket contract
+    /// @dev Only callable by accounts with PROTOCOL_PARAM_MANAGER_ROLE
+    /// @param newDelay New delay in seconds
     function updateErc20RescueDelay(uint256 newDelay) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) {
         uint256 oldDelay = erc20RescueDelay;
        erc20RescueDelay = newDelay;
@@ -146,39 +151,13 @@ contract AdminControl is AccessControl, Pausable {
         }
     }
 
-    // ========== Reward Management ==========
-    /// @notice Configures the reward parameters for the system
-    /// @dev Only callable by accounts with REWARD_MANAGER role
-    /// @param newBaseRate New base reward rate in basis points
-    /// @param newMultiplier New community multiplier for rewards
-    /// @param newLeaseBonus New maximum lease bonus percentage
-    function configureRewards(
-        uint256 newBaseRate,
-        uint256 newMultiplier,
-        uint256 newLeaseBonus
-    ) external onlyRole(REWARD_MANAGER_ROLE) {
-        require(rewardParams.rewardsVault != address(0), "Rewards vault not set");
-        require(newBaseRate <= 2000, "Base rate >20%");
-        require(newMultiplier <= 2000, "Multiplier >20%");
-        require(newLeaseBonus <= 500, "Lease bonus >5%");
-
-        uint256 oldRate = rewardParams.baseRate;
-        uint256 oldMulti = rewardParams.communityMultiplier;
-        
-        rewardParams.baseRate = newBaseRate;
-        rewardParams.communityMultiplier = newMultiplier;
-        rewardParams.maxLeaseBonus = newLeaseBonus;
-        
-        emit RewardParametersUpdated(oldRate, newBaseRate, oldMulti, newMultiplier, msg.sender);
-    }
-
     // ========== Emergency Controls ==========
     /// @notice Pauses or unpauses a specific function in emergency situations
     /// @dev Only callable by accounts with DEFAULT_ADMIN_ROLE
     /// @param functionId ID of the function to pause/unpause
     /// @param paused True to pause, false to unpause
-    function emergencyPauseFunction(
-        uint256 functionId, 
+    function setFunctionPausedStatus(
+        bytes32 functionId, 
         bool paused
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         functionPaused[functionId] = paused;
@@ -196,36 +175,6 @@ contract AdminControl is AccessControl, Pausable {
         _unpause();
     }
 
-    // ========== Community Score Management ==========
-    /// @notice Updates a user's community score
-    /// @dev Only callable by accounts with OPERATOR_ROLE
-    /// @param user Address of the user to update score
-    /// @param scoreDelta Amount to change the score by
-    /// @param isAddition True to add score, false to subtract
-    function updateCommunityScore(
-        address user, 
-        uint256 scoreDelta, 
-        bool isAddition
-    ) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) {
-        uint256 oldScore = communityScores[user];
-        uint256 newScore;
-        
-        if(isAddition) {
-            newScore = oldScore + scoreDelta;
-        } else {
-            newScore = oldScore > scoreDelta ? oldScore - scoreDelta : 0;
-        }
-        
-        communityScores[user] = newScore;
-        emit CommunityScoreUpdated(user, oldScore, newScore);
-    }
-
-    // ========== View Functions ==========
-    /// @notice Gets the current base fee rate
-    /// @return Current base fee rate in basis points
-    function getCurrentFee() external view returns (uint256) {
-        return feeConfig.baseFee;
-    }
 
     /// @notice Checks if an account is KYC verified
     /// @param account Address to check KYC status
@@ -234,42 +183,15 @@ contract AdminControl is AccessControl, Pausable {
         return _kycVerified.contains(account);
     }
 
-    /// @notice Calculates total rewards for a user including all bonuses
-    /// @dev Includes base rate, lease bonus and community bonus
-    /// @param user Address of the user to calculate rewards for
-    /// @param baseAmount Base amount to calculate rewards on
-    /// @return Total reward amount including all bonuses
-    function calculateRewards(
-        address user, 
-        uint256 baseAmount
-    ) external view returns (uint256) {
-        uint256 leaseBonus = _getLeaseBonus(user);
-        uint256 communityBonus = _getCommunityBonus(user);
-        return baseAmount * (rewardParams.baseRate + leaseBonus + communityBonus) / BASIS_POINTS;
-    }
-
-    // ========== Internal Functions ==========
-    /// @notice Gets lease bonus for a user
-    /// @dev Implementation roadmap: integrate with lease duration tracking
-    /// @return Lease bonus in basis points
-    function _getLeaseBonus(address /*user*/) internal view returns (uint256) {
-        // TODO: Implement actual lease duration calculation
-        return rewardParams.maxLeaseBonus;
-    }
-
-    /// @notice Gets community bonus for a user based on their score
-    /// @param user Address of the user
-    /// @return Community bonus in basis points
-    function _getCommunityBonus(address user) internal view returns (uint256) {
-        uint256 score = communityScores[user];
-        return score > rewardParams.communityMultiplier ? 
-            rewardParams.communityMultiplier : score;
-    }
-
-    /// @notice Modifier to check if a function is active
-    /// @param functionId ID of the function to check
-    modifier whenFunctionActive(uint256 functionId) {
-        require(!functionPaused[functionId], "Function paused");
-        _;
+    /// @notice Checks if a function or the entire contract is paused.
+    /// @dev Reverts with GlobalPause() if globally paused, or FunctionPaused(functionId) if the specific function is paused.
+    /// @param functionId ID of the function to check.
+    function checkPaused(bytes32 functionId) external view {
+        if (paused()) {
+            revert GlobalPause(); 
+        }
+        if (functionPaused[functionId]) {
+            revert FunctionPaused(functionId);
+        }
     }
 }

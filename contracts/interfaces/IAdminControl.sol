@@ -8,7 +8,9 @@ interface IAdminControl {
     function PROTOCOL_PARAM_MANAGER_ROLE() external view returns (bytes32);
     function TOKEN_WHITELIST_MANAGER_ROLE() external view returns (bytes32);
     function ERC20_RESCUE_ROLE() external view returns (bytes32);
+    function KYC_ROLE() external view returns (bytes32);
     function isKYCVerified(address account) external view returns (bool);
     function feeConfig() external view returns (uint256 baseFee, uint256 maxFee, address feeCollector);
     function erc20RescueDelay() external view returns (uint256);
+    function checkPaused(bytes32 functionId) external view;
 }

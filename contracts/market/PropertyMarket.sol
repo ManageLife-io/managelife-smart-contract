@@ -137,6 +137,12 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      */
     IManageLifePropertyNFT public immutable manageLifePropertyNFT;
 
+    // ============ Function IDs for Pausing ==========
+    bytes32 public constant LISTING_OPERATIONS = keccak256("LISTING_OPERATIONS");
+    bytes32 public constant OFFER_OPERATIONS = keccak256("OFFER_OPERATIONS");
+    bytes32 public constant PURCHASE_OPERATIONS = keccak256("PURCHASE_OPERATIONS");
+    bytes32 public constant MARKET_CONFIGURATION = keccak256("MARKET_CONFIGURATION");
+
     /**
      * @notice A mapping of ERC20 token addresses that are permitted for use as payment. No rebasing or fee-on-transfer tokens allowed.
      */
@@ -565,6 +571,15 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         _;
     }
 
+    /**
+     * @notice Modifier that checks if a function is paused in the AdminControl contract.
+     * @param functionId The ID of the function to check.
+     */
+    modifier whenFunctionActive(bytes32 functionId) {
+        adminControl.checkPaused(functionId);
+        _;
+    }
+
     //Constructor
 
     /**
@@ -608,7 +623,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @dev Can only be called by an account with the TOKEN_WHITELIST_MANAGER_ROLE.
      * @param token The address of the ERC20 token to add.
      */
-    function addAllowedToken(address token) external onlyTokenWhitelistManager {
+    function addAllowedToken(address token) external onlyTokenWhitelistManager whenFunctionActive(MARKET_CONFIGURATION) {
         if (token == address(0)) {
             revert InvalidToken();
         }
@@ -622,7 +637,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @dev Can only be called by an account with the TOKEN_WHITELIST_MANAGER_ROLE.
      * @param token The address of the ERC20 token to remove.
      */
-    function removeAllowedToken(address token) external onlyTokenWhitelistManager {
+    function removeAllowedToken(address token) external onlyTokenWhitelistManager whenFunctionActive(MARKET_CONFIGURATION) {
         if (token == address(0)) {
             revert InvalidToken();
         }
@@ -646,6 +661,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         onlyKYCVerified
         onlyAllowedToken(paymentToken)
         onlyNonZeroAmount(price)
+        whenFunctionActive(LISTING_OPERATIONS)
     {
         if (confirmationPeriod > maxConfirmationPeriod) {
             revert RequestedConfirmationPeriodTooLong(confirmationPeriod, maxConfirmationPeriod);
@@ -662,7 +678,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @dev Can only be called by the seller of the property, in the listed state, not in a pending purchase.
      * @param tokenId The ID of the NFT to unlist.
      */
-    function unlistProperty(uint256 tokenId) external onlyKYCVerified onlySellerCanCall(tokenId) nonReentrant {
+    function unlistProperty(uint256 tokenId) external onlyKYCVerified onlySellerCanCall(tokenId) nonReentrant whenFunctionActive(LISTING_OPERATIONS) {
         PropertyListing storage listing = listings[tokenId];
         if (listing.status != PropertyStatus.LISTED) {
             revert TokenNotListed(tokenId);
@@ -687,6 +703,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         onlyNonZeroAmount(newPrice)
         onlyAllowedToken(newPaymentToken)
         onlyNftPropertyManager
+        whenFunctionActive(LISTING_OPERATIONS)
     {
         _updateListing(tokenId, newPrice, newPaymentToken);
     }
@@ -706,6 +723,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         onlySellerCanCall(tokenId)
         onlyKYCVerified
         nonReentrant
+        whenFunctionActive(LISTING_OPERATIONS)
     {
         _updateListing(tokenId, newPrice, newPaymentToken);
     }
@@ -723,6 +741,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         external
         nonReentrant
         onlyKYCVerified
+        whenFunctionActive(PURCHASE_OPERATIONS)
     {
         PropertyListing storage listing = listings[tokenId];
         if (listing.status != PropertyStatus.LISTED) {
@@ -748,7 +767,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @dev Can only be called by the seller before the confirmation period expires.
      * @param tokenId The ID of the NFT being purchased.
      */
-    function confirmPurchase(uint256 tokenId) external nonReentrant onlySellerCanCall(tokenId) onlyKYCVerified {
+    function confirmPurchase(uint256 tokenId) external nonReentrant onlySellerCanCall(tokenId) onlyKYCVerified whenFunctionActive(PURCHASE_OPERATIONS) {
         (PropertyListing storage listing, PendingPurchase storage purchase) = _performPendingPurchaseChecks(tokenId);
 
         //Send the NFT to buyer,  because it's escrowed already.
@@ -808,6 +827,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         onlyKYCVerified
         onlyNonZeroAmount(offerAmount)
         nonReentrant
+        whenFunctionActive(OFFER_OPERATIONS)
     {
         PropertyListing storage listing = listings[tokenId];
         IERC20 paymentToken = IERC20(listing.paymentToken);
@@ -895,6 +915,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         onlySellerCanCall(tokenId)
         nonReentrant
         onlyKYCVerified
+        whenFunctionActive(OFFER_OPERATIONS)
     {
         PropertyListing storage listing = listings[tokenId];
         if (listing.status != PropertyStatus.LISTED) {
@@ -944,6 +965,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         nonReentrant
         onlySellerCanCall(tokenId)
         onlyKYCVerified
+        whenFunctionActive(OFFER_OPERATIONS)
     {
         PropertyListing storage listing = listings[tokenId];
         if (block.timestamp >= listing.reviewingOffersUntil) {
@@ -1024,6 +1046,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         external
         onlyProtocolParamManager
         onlyNonZeroAmount(newMinConfirmationPeriod)
+        whenFunctionActive(MARKET_CONFIGURATION)
     {
         if (newMinConfirmationPeriod > maxConfirmationPeriod) {
             revert MinConfirmationPeriodTooHigh(newMinConfirmationPeriod, maxConfirmationPeriod);
@@ -1038,7 +1061,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @dev Can only be called by an account with the PROTOCOL_PARAM_MANAGER_ROLE.
      * @param newMaxConfirmationPeriod The new maximum period in seconds.
      */
-    function setMaxConfirmationPeriod(uint256 newMaxConfirmationPeriod) external onlyProtocolParamManager {
+    function setMaxConfirmationPeriod(uint256 newMaxConfirmationPeriod) external onlyProtocolParamManager whenFunctionActive(MARKET_CONFIGURATION) {
         if (newMaxConfirmationPeriod < minConfirmationPeriod) {
             revert MaxConfirmationPeriodTooLow(newMaxConfirmationPeriod, minConfirmationPeriod);
         }
@@ -1056,6 +1079,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         external
         onlyProtocolParamManager
         onlyNonZeroAmount(newMaxOfferTTL)
+        whenFunctionActive(MARKET_CONFIGURATION)
     {
         uint256 oldMaxOfferTTL = maxOfferTTL;
         maxOfferTTL = newMaxOfferTTL;
@@ -1072,6 +1096,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         external
         onlyProtocolParamManager
         onlyNonZeroAmount(newOfferReviewPeriod)
+        whenFunctionActive(MARKET_CONFIGURATION)
     {
         uint256 oldOfferReviewPeriod = offerReviewPeriod;
         offerReviewPeriod = newOfferReviewPeriod;

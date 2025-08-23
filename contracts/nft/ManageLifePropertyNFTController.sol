@@ -17,6 +17,10 @@ contract ManageLifePropertyNFTController{
     /// @notice The maximum number of NFTs that can be minted in a single batch transaction.
     uint256 public immutable MAX_BATCH_SIZE = 25;
 
+    // ============ Function IDs for Pausing ==========
+    bytes32 public constant MINTING_OPERATIONS = keccak256("MINTING_OPERATIONS");
+    bytes32 public constant CONTROLLER_CONFIGURATION = keccak256("CONTROLLER_CONFIGURATION");
+
     // ============ Events ============
     /// @notice Emitted when a new property NFT is minted.
     /// @param to The address receiving the new NFT.
@@ -87,11 +91,18 @@ contract ManageLifePropertyNFTController{
         _;
     }
 
+    /// @notice Modifier that checks if a function is paused in the AdminControl contract.
+    /// @param functionId The ID of the function to check.
+    modifier whenFunctionActive(bytes32 functionId) {
+        adminController.checkPaused(functionId);
+        _;
+    }
+
     // ============ Admin Functions ============
     /// @notice Updates the AdminControl contract address.
     /// @dev This function can only be called by a default admin.
     /// @param newController The new AdminControl contract instance.
-    function setAdminController(IAdminControl newController) external onlyAdmin {
+    function setAdminController(IAdminControl newController) external onlyAdmin whenFunctionActive(CONTROLLER_CONFIGURATION) {
         if (address(newController) == address(0)) {
             revert ZeroAddress();
         }
@@ -104,7 +115,7 @@ contract ManageLifePropertyNFTController{
     /// @dev This can only be called by an address with the NFT_PROPERTY_MANAGER_ROLE.
     /// @param tokenId The ID of the token to update.
     /// @param deedHeldAtManageLife The new boolean status.
-    function setDeedHeldAtManageLife(uint256 tokenId, bool deedHeldAtManageLife) external onlyNftPropertyManager {
+    function setDeedHeldAtManageLife(uint256 tokenId, bool deedHeldAtManageLife) external onlyNftPropertyManager whenFunctionActive(MINTING_OPERATIONS) {
         manageLifePropertiesNftContract.setDeedHeldAtManageLife(tokenId, deedHeldAtManageLife);
     }
 
@@ -112,7 +123,7 @@ contract ManageLifePropertyNFTController{
     /// @dev This function can only be called by a default admin.
     /// The new NFT contract must have this contract as its controller and the same admin controller.
     /// @param newPropertyNFTContract The new ManageLifePropertyNFT contract instance.
-    function setManageLifePropertyNFTContract(IManageLifePropertyNFT newPropertyNFTContract) external onlyAdmin {
+    function setManageLifePropertyNFTContract(IManageLifePropertyNFT newPropertyNFTContract) external onlyAdmin whenFunctionActive(CONTROLLER_CONFIGURATION) {
         if (address(newPropertyNFTContract) == address(0)) {
             revert ZeroAddress();
         }
@@ -129,7 +140,7 @@ contract ManageLifePropertyNFTController{
     /// @param to The address to mint the new NFT to.
     /// @param deedHeldAtManageLife A boolean indicating if the deed is held by ManageLife.
     /// @return tokenId The ID of the newly minted token.
-    function mint(address to, bool deedHeldAtManageLife) external onlyNftPropertyManager returns (uint256) {
+    function mint(address to, bool deedHeldAtManageLife) external onlyNftPropertyManager whenFunctionActive(MINTING_OPERATIONS) returns (uint256) {
         uint256 tokenId = manageLifePropertiesNftContract.mintPropertyNFT(to, deedHeldAtManageLife);
         emit PropertyMinted(to, tokenId, msg.sender);
         return tokenId;
@@ -142,7 +153,7 @@ contract ManageLifePropertyNFTController{
     /// @param recipients An array of addresses to mint the new NFTs to.
     /// @param deedHeldAtManageLife An array of booleans indicating if the deeds are held by ManageLife.
     /// @return tokenIds An array of the newly minted token IDs.
-    function mintBatch(address[] calldata recipients, bool[] calldata deedHeldAtManageLife) external onlyNftPropertyManager returns (uint256[] memory) {
+    function mintBatch(address[] calldata recipients, bool[] calldata deedHeldAtManageLife) external onlyNftPropertyManager whenFunctionActive(MINTING_OPERATIONS) returns (uint256[] memory) {
  
         if (recipients.length > MAX_BATCH_SIZE) {
             revert InvalidBatchSize(recipients.length, MAX_BATCH_SIZE);
