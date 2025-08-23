@@ -13,7 +13,8 @@
     "test:admin": "npx hardhat test tests/AdminControl.test.js",
     "test:coverage": "npx hardhat coverage",
     "deploy:local": "npx hardhat run hardhat_scripts/deploy_with_ethers.ts --network hardhat",
-    "clean": "npx hardhat clean"
+    "clean": "npx hardhat clean",
+    "postinstall": "node script/index.js"
   },
   "devDependencies": {
     "@openzeppelin/contracts": "^4.9.6",

@@ -152,12 +152,12 @@ contract PropertyMarket is ReentrancyGuard {
     function isTokenAllowed(address token) internal view returns (bool) {
         return allowedPaymentTokens[token];
     }
-    function addAllowedToken(address token) external onlyAdminControlOperator {
+    function addAllowedToken(address token) external onlyAdminControlAdmin {
         require(token != address(0), ErrorCodes.E001);
         allowedPaymentTokens[token] = true;
         emit PaymentTokenAdded(token);
     }
-    function removeAllowedToken(address token) external onlyAdminControlOperator {
+    function removeAllowedToken(address token) external onlyAdminControlAdmin {
         require(token != address(0), ErrorCodes.E001);
         allowedPaymentTokens[token] = false;
         emit PaymentTokenRemoved(token);
@@ -385,7 +385,7 @@ contract PropertyMarket is ReentrancyGuard {
         token.safeTransfer(feeCollector, fees);
         
     }
-    function updateListing(uint256 tokenId, uint256 newPrice, address newPaymentToken) external onlyAdminControlOperator {
+    function updateListing(uint256 tokenId, uint256 newPrice, address newPaymentToken) external onlyAdminControlAdmin {
         PropertyListing storage listing = listings[tokenId];
         require(listing.status == PropertyStatus.LISTED, ErrorCodes.E103);
         require(newPrice > 0, ErrorCodes.E104);
@@ -401,11 +401,6 @@ contract PropertyMarket is ReentrancyGuard {
 
     modifier onlyAdminControlAdmin(){
         require(adminControl.hasRole(adminControl.DEFAULT_ADMIN_ROLE(), msg.sender), ErrorCodes.E401);
-        _;
-    }
-
-    modifier onlyAdminControlOperator() {
-        require(adminControl.hasRole(adminControl.OPERATOR_ROLE(), msg.sender), ErrorCodes.E402);
         _;
     }
 
