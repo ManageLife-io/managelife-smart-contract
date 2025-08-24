@@ -19,6 +19,15 @@ contract AdminControl is AccessControl, Pausable {
     error ZeroAddress();
     error ExceedsMaxFee(uint256 maxFee);
 
+    // ============ Function IDs for Pausing ==========
+
+    //This one pauses all protocol parameter configuration functions
+    bytes32 public constant PROTOCOL_PARAM_CONFIGURATION = keccak256("PROTOCOL_PARAM_CONFIGURATION");
+    //This one pauses all protocol wiring functions (Linking one contract to another post deployment)
+    bytes32 public constant PROTOCOL_WIRING_CONFIGURATION = keccak256("PROTOCOL_WIRING_CONFIGURATION");
+    //This one pauses all kyc configuration functions
+    bytes32 public constant KYC_CONFIGURATION = keccak256("KYC_CONFIGURATION");
+
     // ========== Role Definitions ==========
     bytes32 public constant PROTOCOL_PARAM_MANAGER_ROLE = keccak256("PROTOCOL_PARAM_MANAGER_ROLE");
     bytes32 public constant KYC_ROLE = keccak256("KYC_ROLE");
@@ -95,6 +104,13 @@ contract AdminControl is AccessControl, Pausable {
         erc20RescueDelay = 14 days; //defaults to 14 days, long enough for all sales to finish.
     }
 
+    /// @notice Modifier that checks if a function is paused.
+    /// @param functionId The ID of the function to check.
+    modifier whenFunctionActive(bytes32 functionId) {
+        checkPaused(functionId);
+        _;
+    }
+
     // ========== Fee Management ==========
     /// @notice Updates the fee configuration for the propertyMarket Contract
     /// @dev Only callable by accounts with PROTOCOL_PARAM_MANAGER_ROLE
@@ -103,7 +119,7 @@ contract AdminControl is AccessControl, Pausable {
     function updateFeeConfig(
         uint256 newBaseFee, 
         address newCollector
-    ) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) {
+    ) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) whenFunctionActive(PROTOCOL_PARAM_CONFIGURATION) {
         if(newCollector == address(0)) {
             revert ZeroAddress();
         }
@@ -123,7 +139,7 @@ contract AdminControl is AccessControl, Pausable {
     /// @notice Updates the delay for the erc20 rescue function in the propertyMarket contract
     /// @dev Only callable by accounts with PROTOCOL_PARAM_MANAGER_ROLE
     /// @param newDelay New delay in seconds
-    function updateErc20RescueDelay(uint256 newDelay) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) {
+    function updateErc20RescueDelay(uint256 newDelay) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) whenFunctionActive(PROTOCOL_PARAM_CONFIGURATION) {
         uint256 oldDelay = erc20RescueDelay;
        erc20RescueDelay = newDelay;
         emit Erc20RescueDelayUpdated(oldDelay, newDelay, msg.sender);
@@ -137,7 +153,7 @@ contract AdminControl is AccessControl, Pausable {
     function batchApproveKYC(
         address[] calldata accounts, 
         bool approved
-    ) external onlyRole(KYC_ROLE) {
+    ) external onlyRole(KYC_ROLE) whenFunctionActive(KYC_CONFIGURATION) {
         uint256 length = accounts.length;
         for(uint256 i = 0; i < length;) {
             address account = accounts[i];
@@ -186,7 +202,7 @@ contract AdminControl is AccessControl, Pausable {
     /// @notice Checks if a function or the entire contract is paused.
     /// @dev Reverts with GlobalPause() if globally paused, or FunctionPaused(functionId) if the specific function is paused.
     /// @param functionId ID of the function to check.
-    function checkPaused(bytes32 functionId) external view {
+    function checkPaused(bytes32 functionId) public view {
         if (paused()) {
             revert GlobalPause(); 
         }

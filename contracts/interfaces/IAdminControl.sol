@@ -13,4 +13,6 @@ interface IAdminControl {
     function feeConfig() external view returns (uint256 baseFee, uint256 maxFee, address feeCollector);
     function erc20RescueDelay() external view returns (uint256);
     function checkPaused(bytes32 functionId) external view;
+    function PROTOCOL_PARAM_CONFIGURATION() external view returns (bytes32);
+    function PROTOCOL_WIRING_CONFIGURATION() external view returns (bytes32);
 }

@@ -62,10 +62,23 @@ contract ManageLifePropertyNFT is ERC721 {
     /// @dev Revert when an empty base URI is provided.
     error EmptyMetadataURI();
 
+    /// @dev Revert when a function is called by an address that does not have the PROTOCOL_PARAM_MANAGER_ROLE.
+    error OnlyProtocolParamManagerCanCall();
+
     /// @notice Restricts caller to `DEFAULT_ADMIN_ROLE` from `adminController`.
     modifier onlyAdmin() {
         if (!adminController.hasRole(adminController.DEFAULT_ADMIN_ROLE(), msg.sender)) {
             revert NotAdmin();
+        }
+        _;
+    }
+
+    /**
+     * @dev Throws if called by any account that does not have the PROTOCOL_PARAM_MANAGER_ROLE.
+     */
+    modifier onlyProtocolParamManager() {
+        if (!adminController.hasRole(adminController.PROTOCOL_PARAM_MANAGER_ROLE(), msg.sender)) {
+            revert OnlyProtocolParamManagerCanCall();
         }
         _;
     }
@@ -75,6 +88,13 @@ contract ManageLifePropertyNFT is ERC721 {
         if (propertyControllerContract != msg.sender) {
             revert NotController();
         }
+        _;
+    }
+
+    /// @notice Modifier that checks if a function is paused in the AdminControl contract.
+    /// @param functionId The ID of the function to check.
+    modifier whenFunctionActive(bytes32 functionId) {
+        adminController.checkPaused(functionId);
         _;
     }
 
@@ -142,7 +162,7 @@ contract ManageLifePropertyNFT is ERC721 {
     /// @notice Sets the property controller contract address.
     /// @dev Only `DEFAULT_ADMIN_ROLE`. Reverts on zero address.
     /// @param newPropertyController The new controller address.
-    function setPropertyControllerContract(address newPropertyController) external onlyAdmin {
+    function setPropertyControllerContract(address newPropertyController) external onlyAdmin whenFunctionActive(adminController.PROTOCOL_WIRING_CONFIGURATION()) {
         if (newPropertyController == address(0)) revert ZeroAddress();
         address oldPropertyController = propertyControllerContract;
         propertyControllerContract = newPropertyController;
@@ -152,7 +172,7 @@ contract ManageLifePropertyNFT is ERC721 {
     /// @notice Sets the admin controller contract address.
     /// @dev Only `DEFAULT_ADMIN_ROLE`. Reverts on zero address.
     /// @param newAdminController The new admin controller address.
-    function setAdminController(address newAdminController) external onlyAdmin {
+    function setAdminController(address newAdminController) external onlyAdmin whenFunctionActive(adminController.PROTOCOL_WIRING_CONFIGURATION()) {
         if (newAdminController == address(0)) revert ZeroAddress();
         address oldAdminController = address(adminController);
         adminController = IAdminControl(newAdminController);
@@ -162,7 +182,7 @@ contract ManageLifePropertyNFT is ERC721 {
     /// @notice Updates the base token URI. Accepts inputs with or without trailing slashes.
     /// @dev Only `DEFAULT_ADMIN_ROLE`. Normalized to exactly one trailing '/' before storage.
     /// @param _baseUri New base URI string.
-    function setBaseTokenURI(string memory _baseUri) external onlyAdmin {
+    function setBaseTokenURI(string memory _baseUri) external onlyProtocolParamManager whenFunctionActive(adminController.PROTOCOL_PARAM_CONFIGURATION()) {
         if (bytes(_baseUri).length == 0) revert EmptyMetadataURI();
         _baseTokenURI = _normalizeBaseUri(_baseUri);
         emit BaseTokenURISet(_baseTokenURI);

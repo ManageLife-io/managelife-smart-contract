@@ -135,13 +135,12 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
     /**
      * @notice The instance of the ManageLifePropertyNFT contract that this market operates on.
      */
-    IManageLifePropertyNFT public immutable manageLifePropertyNFT;
+    IManageLifePropertyNFT public manageLifePropertyNFT;
 
     // ============ Function IDs for Pausing ==========
     bytes32 public constant LISTING_OPERATIONS = keccak256("LISTING_OPERATIONS");
     bytes32 public constant OFFER_OPERATIONS = keccak256("OFFER_OPERATIONS");
     bytes32 public constant PURCHASE_OPERATIONS = keccak256("PURCHASE_OPERATIONS");
-    bytes32 public constant MARKET_CONFIGURATION = keccak256("MARKET_CONFIGURATION");
 
     /**
      * @notice A mapping of ERC20 token addresses that are permitted for use as payment. No rebasing or fee-on-transfer tokens allowed.
@@ -432,6 +431,20 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      */
     event OfferReviewPeriodSet(uint256 oldOfferReviewPeriod, uint256 newOfferReviewPeriod);
 
+    /**
+     * @notice Emitted when the ManageLifePropertyNFT contract is updated.
+     * @param oldManageLifePropertyNFTContract The previous ManageLifePropertyNFT contract.
+     * @param newManageLifePropertyNFTContract The new ManageLifePropertyNFT contract.
+     */
+    event ManageLifePropertyNFTContractUpdated(address oldManageLifePropertyNFTContract, address newManageLifePropertyNFTContract);
+
+    /**
+     * @notice Emitted when the AdminControl contract is updated.
+     * @param oldAdminControl The previous AdminControl contract.
+     * @param newAdminControl The new AdminControl contract.
+     */
+    event AdminControlUpdated(address oldAdminControl, address newAdminControl);
+
     //Errors
     error DirectEthTransferNotAllowed();
     error NotOwnerOfToken(uint256 tokenId, address owner);
@@ -485,12 +498,13 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
     error UpdateNotAllowedWhileSellerIsReviewingOffers(uint256 tokenId);
     error CannotListInCurrentState(uint256 tokenId, PropertyStatus currentStatus);
     error Unescrowable(uint256 tokenId, address currentOwner);
+    error newNFTContractHasDifferentAdminController(address adminControllerOnNftContract, address adminControl);
     //Modifiers
 
     /**
      * @dev Throws if called by any account other than the admin of the AdminControl contract.
      */
-    modifier onlyAdminControlAdmin() {
+    modifier onlyAdmin() {
         if (!adminControl.hasRole(adminControl.DEFAULT_ADMIN_ROLE(), msg.sender)) {
             revert OnlyAdminCanCall();
         }
@@ -623,7 +637,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @dev Can only be called by an account with the TOKEN_WHITELIST_MANAGER_ROLE.
      * @param token The address of the ERC20 token to add.
      */
-    function addAllowedToken(address token) external onlyTokenWhitelistManager whenFunctionActive(MARKET_CONFIGURATION) {
+    function addAllowedToken(address token) external onlyTokenWhitelistManager whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION()) {
         if (token == address(0)) {
             revert InvalidToken();
         }
@@ -637,7 +651,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @dev Can only be called by an account with the TOKEN_WHITELIST_MANAGER_ROLE.
      * @param token The address of the ERC20 token to remove.
      */
-    function removeAllowedToken(address token) external onlyTokenWhitelistManager whenFunctionActive(MARKET_CONFIGURATION) {
+    function removeAllowedToken(address token) external onlyTokenWhitelistManager whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION()) {
         if (token == address(0)) {
             revert InvalidToken();
         }
@@ -1046,7 +1060,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         external
         onlyProtocolParamManager
         onlyNonZeroAmount(newMinConfirmationPeriod)
-        whenFunctionActive(MARKET_CONFIGURATION)
+        whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION())
     {
         if (newMinConfirmationPeriod > maxConfirmationPeriod) {
             revert MinConfirmationPeriodTooHigh(newMinConfirmationPeriod, maxConfirmationPeriod);
@@ -1061,7 +1075,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @dev Can only be called by an account with the PROTOCOL_PARAM_MANAGER_ROLE.
      * @param newMaxConfirmationPeriod The new maximum period in seconds.
      */
-    function setMaxConfirmationPeriod(uint256 newMaxConfirmationPeriod) external onlyProtocolParamManager whenFunctionActive(MARKET_CONFIGURATION) {
+    function setMaxConfirmationPeriod(uint256 newMaxConfirmationPeriod) external onlyProtocolParamManager whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION()) {
         if (newMaxConfirmationPeriod < minConfirmationPeriod) {
             revert MaxConfirmationPeriodTooLow(newMaxConfirmationPeriod, minConfirmationPeriod);
         }
@@ -1079,7 +1093,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         external
         onlyProtocolParamManager
         onlyNonZeroAmount(newMaxOfferTTL)
-        whenFunctionActive(MARKET_CONFIGURATION)
+        whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION())
     {
         uint256 oldMaxOfferTTL = maxOfferTTL;
         maxOfferTTL = newMaxOfferTTL;
@@ -1096,11 +1110,36 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         external
         onlyProtocolParamManager
         onlyNonZeroAmount(newOfferReviewPeriod)
-        whenFunctionActive(MARKET_CONFIGURATION)
+        whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION())
     {
         uint256 oldOfferReviewPeriod = offerReviewPeriod;
         offerReviewPeriod = newOfferReviewPeriod;
         emit OfferReviewPeriodSet(oldOfferReviewPeriod, newOfferReviewPeriod);
+    }
+
+    function setManageLifePropertyNFTContract(IManageLifePropertyNFT newPropertyNFTContract) external onlyAdmin whenFunctionActive(adminControl.PROTOCOL_WIRING_CONFIGURATION()) {
+        if (address(newPropertyNFTContract) == address(0)) {
+            revert ZeroAddress();
+        }
+
+        // Ensure the NFT contract's admin controller matches this controller's admin controller.
+        address adminControllerOnNftContract = address(newPropertyNFTContract.adminController());
+        if (adminControllerOnNftContract != address(adminControl)) {
+            revert newNFTContractHasDifferentAdminController(adminControllerOnNftContract, address(adminControl));
+        }
+
+        address oldManageLifePropertyNFTContract = address(manageLifePropertyNFT);
+        manageLifePropertyNFT = newPropertyNFTContract;
+        emit ManageLifePropertyNFTContractUpdated(oldManageLifePropertyNFTContract, address(newPropertyNFTContract));
+    }
+
+    function setAdminControl(IAdminControl newAdminControl) external onlyAdmin whenFunctionActive(adminControl.PROTOCOL_WIRING_CONFIGURATION()) {
+        if (address(newAdminControl) == address(0)) {
+            revert ZeroAddress();
+        }
+        address oldAdminControl = address(adminControl);
+        adminControl = newAdminControl;
+        emit AdminControlUpdated(oldAdminControl, address(newAdminControl));
     }
 
     //View functions
