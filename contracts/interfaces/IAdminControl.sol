@@ -15,4 +15,5 @@ interface IAdminControl {
     function checkPaused(bytes32 functionId) external view;
     function PROTOCOL_PARAM_CONFIGURATION() external view returns (bytes32);
     function PROTOCOL_WIRING_CONFIGURATION() external view returns (bytes32);
+    function PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE() external view returns (bytes32);
 }

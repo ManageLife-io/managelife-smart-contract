@@ -499,6 +499,8 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
     error CannotListInCurrentState(uint256 tokenId, PropertyStatus currentStatus);
     error Unescrowable(uint256 tokenId, address currentOwner);
     error newNFTContractHasDifferentAdminController(address adminControllerOnNftContract, address adminControl);
+    error OnlyProtocolParamTimelockedManagerCanCall();
+
     //Modifiers
 
     /**
@@ -522,11 +524,11 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
     }
 
     /**
-     * @dev Throws if called by any account that does not have the PROTOCOL_PARAM_MANAGER_ROLE.
+     * @dev Throws if called by any account that does not have the PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE.
      */
-    modifier onlyProtocolParamManager() {
-        if (!adminControl.hasRole(adminControl.PROTOCOL_PARAM_MANAGER_ROLE(), msg.sender)) {
-            revert OnlyProtocolParamManagerCanCall();
+    modifier onlyProtocolParamTimelockedManager() {
+        if (!adminControl.hasRole(adminControl.PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE(), msg.sender)) {
+            revert OnlyProtocolParamTimelockedManagerCanCall();
         }
         _;
     }
@@ -1053,12 +1055,12 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
     //Configuration functions
     /**
      * @notice Sets the minimum confirmation period for new listings.
-     * @dev Can only be called by an account with the PROTOCOL_PARAM_MANAGER_ROLE.
+     * @dev Can only be called by an account with the PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE.
      * @param newMinConfirmationPeriod The new minimum period in seconds.
      */
     function setMinConfirmationPeriod(uint256 newMinConfirmationPeriod)
         external
-        onlyProtocolParamManager
+        onlyProtocolParamTimelockedManager
         onlyNonZeroAmount(newMinConfirmationPeriod)
         whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION())
     {
@@ -1072,10 +1074,10 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
 
     /**
      * @notice Sets the maximum confirmation period for new listings.
-     * @dev Can only be called by an account with the PROTOCOL_PARAM_MANAGER_ROLE.
+     * @dev Can only be called by an account with the PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE.
      * @param newMaxConfirmationPeriod The new maximum period in seconds.
      */
-    function setMaxConfirmationPeriod(uint256 newMaxConfirmationPeriod) external onlyProtocolParamManager whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION()) {
+    function setMaxConfirmationPeriod(uint256 newMaxConfirmationPeriod) external onlyProtocolParamTimelockedManager whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION()) {
         if (newMaxConfirmationPeriod < minConfirmationPeriod) {
             revert MaxConfirmationPeriodTooLow(newMaxConfirmationPeriod, minConfirmationPeriod);
         }
@@ -1086,12 +1088,12 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
 
     /**
      * @notice Sets the maximum time-to-live for new offers.
-     * @dev Can only be called by an account with the PROTOCOL_PARAM_MANAGER_ROLE.
+     * @dev Can only be called by an account with the PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE.
      * @param newMaxOfferTTL The new maximum TTL in seconds.
      */
     function setMaxOfferTTL(uint256 newMaxOfferTTL)
         external
-        onlyProtocolParamManager
+        onlyProtocolParamTimelockedManager
         onlyNonZeroAmount(newMaxOfferTTL)
         whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION())
     {
@@ -1102,13 +1104,13 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
 
     /**
      * @notice Sets the duration for the offer review period.
-     * @dev Can only be called by an account with the PROTOCOL_PARAM_MANAGER_ROLE.
+     * @dev Can only be called by an account with the PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE.
      * @dev This should be long enough to allow the seller to review offers and accept or reject them.
      * @param newOfferReviewPeriod The new duration in seconds.
      */
     function setOfferReviewPeriod(uint256 newOfferReviewPeriod)
         external
-        onlyProtocolParamManager
+        onlyProtocolParamTimelockedManager
         onlyNonZeroAmount(newOfferReviewPeriod)
         whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION())
     {
