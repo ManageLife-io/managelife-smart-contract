@@ -10,4 +10,5 @@ interface IAdminControl {
     function ERC20_RESCUE_ROLE() external view returns (bytes32);
     function isKYCVerified(address account) external view returns (bool);
     function feeConfig() external view returns (uint256 baseFee, uint256 maxFee, address feeCollector);
+    function erc20RescueDelay() external view returns (uint256);
 }

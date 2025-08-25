@@ -7,6 +7,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {IManageLifePropertyNFT} from "../interfaces/IManageLifePropertyNFT.sol";
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 import {IAdminControl} from "../interfaces/IAdminControl.sol";
+import {RescueERC20Timelock} from "../governance/RescueERC20Timelock.sol";
 
 /**
  * @title PropertyMarket
@@ -15,7 +16,7 @@ import {IAdminControl} from "../interfaces/IAdminControl.sol";
  * @dev Listings have versioning, so that we can validate offers and purchases if the listing is updated, without needing to do deletions.
  * @dev Versions increments on new listings and each listing update; it’s included in events so indexers/UIs can ignore stale versions.
  */
-contract PropertyMarket is ReentrancyGuard, ERC721Holder {
+contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
     using SafeERC20 for IERC20;
 
     //Constants and immutable variables, these should NEVER change after deployment.
@@ -140,10 +141,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @notice A mapping of ERC20 token addresses that are permitted for use as payment. No rebasing or fee-on-transfer tokens allowed.
      */
     mapping(address => bool) public allowedPaymentTokens;
-    /**
-     * @notice The AdminControl contract instance for managing roles, KYC, and fees.
-     */
-    IAdminControl public adminControl;
+
     /**
      * @notice Mapping from token ID to the property listing details.
      */
@@ -429,7 +427,6 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
     event OfferReviewPeriodSet(uint256 oldOfferReviewPeriod, uint256 newOfferReviewPeriod);
 
     //Errors
-    error ZeroAddress();
     error DirectEthTransferNotAllowed();
     error NotOwnerOfToken(uint256 tokenId, address owner);
     error TokenNotListed(uint256 tokenId);
@@ -575,7 +572,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
      * @param _manageLifePropertyNFT The address of the ManageLifePropertyNFT contract.
      * @param _adminControl The address of the AdminControl contract.
      */
-    constructor(IManageLifePropertyNFT _manageLifePropertyNFT, IAdminControl _adminControl) {
+    constructor(IManageLifePropertyNFT _manageLifePropertyNFT, IAdminControl _adminControl) RescueERC20Timelock(_adminControl){
         if (address(_manageLifePropertyNFT) == address(0)) {
             revert ZeroAddress();
         }
@@ -1079,36 +1076,6 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder {
         uint256 oldOfferReviewPeriod = offerReviewPeriod;
         offerReviewPeriod = newOfferReviewPeriod;
         emit OfferReviewPeriodSet(oldOfferReviewPeriod, newOfferReviewPeriod);
-    }
-
-    //Admin Emergency functions
-    /**
-     * @notice Allows an admin to withdraw any ERC20 tokens from this contract in an emergency.
-     * @dev This is a failsafe and should be used with extreme caution.
-     * @dev Consider adding a time lock to this function for enhanced security. TODO: we need to add a time lock to this.
-     * @param token The address of the ERC20 token to withdraw.
-     * @param amount The amount of tokens to withdraw.
-     * @param recipient The address to receive the withdrawn tokens.
-     */
-    function emergencyWithdrawToken(address token, uint256 amount, address recipient)
-        external
-        onlyAdminControlAdmin
-        nonReentrant
-    {
-        if (token == address(0)) {
-            revert InvalidToken();
-        }
-        if (recipient == address(0)) {
-            revert ZeroAddress();
-        }
-        IERC20 tokenContract = IERC20(token);
-        if (amount > tokenContract.balanceOf(address(this))) {
-            revert EmergencyWithdrawAmountTooHigh();
-        }
-
-        tokenContract.safeTransfer(recipient, amount);
-
-        emit EmergencyTokenWithdrawal(token, recipient, amount);
     }
 
     //View functions
