@@ -30,8 +30,9 @@ contract AdminControl is AccessControl, Pausable {
 
     // ========== Role Definitions ==========
     bytes32 public constant PROTOCOL_PARAM_MANAGER_ROLE = keccak256("PROTOCOL_PARAM_MANAGER_ROLE");
+    bytes32 public constant PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE = keccak256("PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE");
+
     bytes32 public constant KYC_ROLE = keccak256("KYC_ROLE");
-    bytes32 public constant REWARD_MANAGER_ROLE = keccak256("REWARD_MANAGER_ROLE");
     bytes32 public constant NFT_PROPERTY_MANAGER_ROLE = keccak256("NFT_PROPERTY_MANAGER_ROLE");
     bytes32 public constant TOKEN_WHITELIST_MANAGER_ROLE = keccak256("TOKEN_WHITELIST_MANAGER_ROLE");
     bytes32 public constant ERC20_RESCUE_ROLE = keccak256("ERC20_RESCUE_ROLE");
@@ -71,18 +72,24 @@ contract AdminControl is AccessControl, Pausable {
     event KYCStatusUpdated(address indexed account, bool approved);
     event Erc20RescueDelayUpdated(uint256 oldDelay, uint256 newDelay, address indexed admin);
 
-    function _initializeRoles(address admin) internal {
+    function _initializeRoles(address admin,address timelockContractAddress) internal {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(PROTOCOL_PARAM_MANAGER_ROLE, admin);
+        _grantRole(PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE, timelockContractAddress);
         _grantRole(KYC_ROLE, admin);
         _grantRole(NFT_PROPERTY_MANAGER_ROLE, admin);
         _grantRole(TOKEN_WHITELIST_MANAGER_ROLE, admin);
         _grantRole(ERC20_RESCUE_ROLE, admin);
     }
 
+    /// @notice Initializes the AdminControl contract with the given parameters.
+    /// @param initialAdmin The address of the initial admin.
+    /// @param feeCollector The address of the fee collector.
+    /// @param timelockContractAddress The address of the timelock contract. (Make sure this is the actual timelock contract address, not the admin address)
     constructor(
         address initialAdmin,
-        address feeCollector
+        address feeCollector,
+        address timelockContractAddress
     ) {
         if(feeCollector == address(0)) {
             revert ZeroAddress();
@@ -92,7 +99,7 @@ contract AdminControl is AccessControl, Pausable {
         }
         
         // Initialize role assignments
-        _initializeRoles(initialAdmin);
+        _initializeRoles(initialAdmin,timelockContractAddress);
 
         // Initialize fee configuration
         feeConfig = FeeSettings({
@@ -113,13 +120,13 @@ contract AdminControl is AccessControl, Pausable {
 
     // ========== Fee Management ==========
     /// @notice Updates the fee configuration for the propertyMarket Contract
-    /// @dev Only callable by accounts with PROTOCOL_PARAM_MANAGER_ROLE
+    /// @dev Only callable by accounts with PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE
     /// @param newBaseFee New base fee rate in basis points (100 = 1%)
     /// @param newCollector New address to collect fees
     function updateFeeConfig(
         uint256 newBaseFee, 
         address newCollector
-    ) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) whenFunctionActive(PROTOCOL_PARAM_CONFIGURATION) {
+    ) external onlyRole(PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE) whenFunctionActive(PROTOCOL_PARAM_CONFIGURATION) {
         if(newCollector == address(0)) {
             revert ZeroAddress();
         }
@@ -137,9 +144,9 @@ contract AdminControl is AccessControl, Pausable {
     }
 
     /// @notice Updates the delay for the erc20 rescue function in the propertyMarket contract
-    /// @dev Only callable by accounts with PROTOCOL_PARAM_MANAGER_ROLE
+    /// @dev Only callable by accounts with PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE
     /// @param newDelay New delay in seconds
-    function updateErc20RescueDelay(uint256 newDelay) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) whenFunctionActive(PROTOCOL_PARAM_CONFIGURATION) {
+    function updateErc20RescueDelay(uint256 newDelay) external onlyRole(PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE) whenFunctionActive(PROTOCOL_PARAM_CONFIGURATION) {
         uint256 oldDelay = erc20RescueDelay;
        erc20RescueDelay = newDelay;
         emit Erc20RescueDelayUpdated(oldDelay, newDelay, msg.sender);
