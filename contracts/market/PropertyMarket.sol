@@ -8,6 +8,7 @@ import {IManageLifePropertyNFT} from "../interfaces/IManageLifePropertyNFT.sol";
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 import {IAdminControl} from "../interfaces/IAdminControl.sol";
 import {RescueERC20Timelock} from "../governance/RescueERC20Timelock.sol";
+import {IRewardsManager} from "../interfaces/IRewardsManager.sol";
 
 /**
  * @title PropertyMarket
@@ -166,6 +167,11 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @notice Mapping from token ID to details of a pending purchase.
      */
     mapping(uint256 => PendingPurchase) public pendingPurchases;
+
+    /**
+     * @notice Rewards manager contract that manages rewards
+     */
+    IRewardsManager public rewardsManager;
 
     //Events
     /**
@@ -602,12 +608,16 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @notice Initializes the PropertyMarket contract.
      * @param _manageLifePropertyNFT The address of the ManageLifePropertyNFT contract.
      * @param _adminControl The address of the AdminControl contract.
+     * @param _rewardsManager The address of the RewardsManager contract.
      */
-    constructor(IManageLifePropertyNFT _manageLifePropertyNFT, IAdminControl _adminControl) RescueERC20Timelock(_adminControl){
+    constructor(IManageLifePropertyNFT _manageLifePropertyNFT, IAdminControl _adminControl, IRewardsManager _rewardsManager) RescueERC20Timelock(_adminControl){
         if (address(_manageLifePropertyNFT) == address(0)) {
             revert ZeroAddress();
         }
         if (address(_adminControl) == address(0)) {
+            revert ZeroAddress();
+        }
+        if (address(_rewardsManager) == address(0)) {
             revert ZeroAddress();
         }
         address adminOnNFT = address(_manageLifePropertyNFT.adminController());
@@ -621,6 +631,9 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         maxConfirmationPeriod = 14 days; //defaults to 14 days
         maxOfferTTL = 90 days; //defaults to 90 days
         offerReviewPeriod = 1 days; //defaults to 1 day
+
+        //TODO: checks
+        rewardsManager = _rewardsManager;
     }
 
     //Receive function
@@ -1472,7 +1485,8 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
 
         uint256 fees = 0;
         uint256 netValue = purchase.price;
-        if (purchase.fee > 0 && purchase.feeCollector != address(0)) {
+        bool isExemptFromSalesFee = rewardsManager.isExemptFromSalesFee(purchase.paymentToken);
+        if (!isExemptFromSalesFee && purchase.fee > 0 && purchase.feeCollector != address(0)) {
             fees = (purchase.price * purchase.fee) / PERCENTAGE_BASE;
             netValue = purchase.price - fees;
         }
