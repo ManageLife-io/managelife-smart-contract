@@ -9,5 +9,25 @@ interface IRewardsManager {
 
     function adminControl() external view returns (IAdminControl);
 
+    function propertyMarketContract() external view returns (address);
+
+    /**
+     * @notice Checks if a given payment token is exempt from sales fees.
+     * @param paymentToken The address of the payment token to check.
+     * @return True if the payment token is exempt from sales fees, false otherwise.
+     */
     function isExemptFromSalesFee(address paymentToken) external view returns (bool);
+
+    /**
+     * @notice Distributes listing rewards to a specified address.
+     * @param to The recipient of the rewards.
+     * @param amount The amount of rewards to distribute.
+     */
+    function distributeListingRewards(address to, uint256 amount) external;
+
+    /**
+     * @notice Returns the current reward rate per second for listings.
+     * @return The amount of rewards distributed per second for listings.
+     */
+    function listingRewardPerSecond() external view returns (uint256);
 }
