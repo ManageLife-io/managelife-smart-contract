@@ -8,6 +8,7 @@ import {IManageLifePropertyNFT} from "../interfaces/IManageLifePropertyNFT.sol";
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 import {IAdminControl} from "../interfaces/IAdminControl.sol";
 import {RescueERC20Timelock} from "../governance/RescueERC20Timelock.sol";
+import {IRewardsManager} from "../interfaces/IRewardsManager.sol";
 
 /**
  * @title PropertyMarket
@@ -16,7 +17,7 @@ import {RescueERC20Timelock} from "../governance/RescueERC20Timelock.sol";
  * @dev Listings have versioning, so that we can validate offers and purchases if the listing is updated, without needing to do deletions.
  * @dev Versions increments on new listings and each listing update; it’s included in events so indexers/UIs can ignore stale versions.
  */
-contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
+contract PropertyMarket is ReentrancyGuard, ERC721Holder, RescueERC20Timelock {
     using SafeERC20 for IERC20;
 
     //Constants and immutable variables, these should NEVER change after deployment.
@@ -41,6 +42,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         address paymentToken; // 20
         // slot 3
         uint256 reviewingOffersUntil; // 32
+        uint256 lastListingRewardClaimed; // 32
     }
 
     /**
@@ -166,6 +168,11 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @notice Mapping from token ID to details of a pending purchase.
      */
     mapping(uint256 => PendingPurchase) public pendingPurchases;
+
+    /**
+     * @notice Rewards manager contract that manages rewards
+     */
+    IRewardsManager public rewardsManager;
 
     //Events
     /**
@@ -436,7 +443,9 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @param oldManageLifePropertyNFTContract The previous ManageLifePropertyNFT contract.
      * @param newManageLifePropertyNFTContract The new ManageLifePropertyNFT contract.
      */
-    event ManageLifePropertyNFTContractUpdated(address oldManageLifePropertyNFTContract, address newManageLifePropertyNFTContract);
+    event ManageLifePropertyNFTContractUpdated(
+        address oldManageLifePropertyNFTContract, address newManageLifePropertyNFTContract
+    );
 
     /**
      * @notice Emitted when the AdminControl contract is updated.
@@ -444,6 +453,19 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @param newAdminControl The new AdminControl contract.
      */
     event AdminControlUpdated(address oldAdminControl, address newAdminControl);
+
+    /**
+     * @notice Emitted when the last listing reward claim timestamp is updated.
+     * @param lastListingRewardClaimed The new last listing reward claim timestamp.
+     */
+    event ListingRewardClaimTimestampUpdated(uint256 indexed tokenId, uint256 lastListingRewardClaimed);
+
+    /**
+     * @notice Emitted when the RewardsManager contract is updated.
+     * @param oldRewardsManager The address of the previous RewardsManager contract.
+     * @param newRewardsManager The address of the new RewardsManager contract.
+     */
+    event RewardsManagerUpdated(address oldRewardsManager, address newRewardsManager);
 
     //Errors
     error DirectEthTransferNotAllowed();
@@ -477,6 +499,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
     error EmergencyWithdrawAmountTooHigh();
     error OnlyAdminCanCall();
     error AdminControlMismatch(address passedAdminControl, address onNFT);
+    error PropertyMarketContractMismatch(address passedPropertyMarketContract, address actualPropertyMarketContract);
     error CallerNotSellerOrBuyer(uint256 tokenId, address caller, address seller, address buyer);
     error FeeMismatch(uint256 expectedFee, uint256 baseFee);
     error InvalidNFTCollection(address token);
@@ -600,16 +623,20 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
 
     /**
      * @notice Initializes the PropertyMarket contract.
+     * @dev The rewards manager is optional, and can be set later.
      * @param _manageLifePropertyNFT The address of the ManageLifePropertyNFT contract.
      * @param _adminControl The address of the AdminControl contract.
      */
-    constructor(IManageLifePropertyNFT _manageLifePropertyNFT, IAdminControl _adminControl) RescueERC20Timelock(_adminControl){
+    constructor(IManageLifePropertyNFT _manageLifePropertyNFT, IAdminControl _adminControl)
+        RescueERC20Timelock(_adminControl)
+    {
         if (address(_manageLifePropertyNFT) == address(0)) {
             revert ZeroAddress();
         }
         if (address(_adminControl) == address(0)) {
             revert ZeroAddress();
         }
+
         address adminOnNFT = address(_manageLifePropertyNFT.adminController());
         if (adminOnNFT != address(_adminControl)) {
             revert AdminControlMismatch(address(_adminControl), adminOnNFT);
@@ -639,7 +666,11 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @dev Can only be called by an account with the TOKEN_WHITELIST_MANAGER_ROLE.
      * @param token The address of the ERC20 token to add.
      */
-    function addAllowedToken(address token) external onlyTokenWhitelistManager whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION()) {
+    function addAllowedToken(address token)
+        external
+        onlyTokenWhitelistManager
+        whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION())
+    {
         if (token == address(0)) {
             revert InvalidToken();
         }
@@ -653,7 +684,11 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @dev Can only be called by an account with the TOKEN_WHITELIST_MANAGER_ROLE.
      * @param token The address of the ERC20 token to remove.
      */
-    function removeAllowedToken(address token) external onlyTokenWhitelistManager whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION()) {
+    function removeAllowedToken(address token)
+        external
+        onlyTokenWhitelistManager
+        whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION())
+    {
         if (token == address(0)) {
             revert InvalidToken();
         }
@@ -692,14 +727,23 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @notice Unlists a property from the marketplace.
      * @dev The NFT held in escrow is returned to the seller.
      * @dev Can only be called by the seller of the property, in the listed state, not in a pending purchase.
+     * @dev This will payout the pending listing rewards to the seller.
      * @param tokenId The ID of the NFT to unlist.
      */
-    function unlistProperty(uint256 tokenId) external onlyKYCVerified onlySellerCanCall(tokenId) nonReentrant whenFunctionActive(LISTING_OPERATIONS) {
+    function unlistProperty(uint256 tokenId)
+        external
+        onlyKYCVerified
+        onlySellerCanCall(tokenId)
+        nonReentrant
+        whenFunctionActive(LISTING_OPERATIONS)
+    {
         PropertyListing storage listing = listings[tokenId];
         if (listing.status != PropertyStatus.LISTED) {
             revert TokenNotListed(tokenId);
         }
         listing.status = PropertyStatus.DELISTED;
+
+        _payoutPendingListingRewards(listing, tokenId);
 
         manageLifePropertyNFT.safeTransferFrom(address(this), msg.sender, tokenId);
 
@@ -781,9 +825,16 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @notice Confirms a pending purchase, completing the sale.
      * @dev Transfers the NFT to the buyer and the payment (less fees) to the seller.
      * @dev Can only be called by the seller before the confirmation period expires.
+     * @dev This will payout the pending listing rewards to the seller.
      * @param tokenId The ID of the NFT being purchased.
      */
-    function confirmPurchase(uint256 tokenId) external nonReentrant onlySellerCanCall(tokenId) onlyKYCVerified whenFunctionActive(PURCHASE_OPERATIONS) {
+    function confirmPurchase(uint256 tokenId)
+        external
+        nonReentrant
+        onlySellerCanCall(tokenId)
+        onlyKYCVerified
+        whenFunctionActive(PURCHASE_OPERATIONS)
+    {
         (PropertyListing storage listing, PendingPurchase storage purchase) = _performPendingPurchaseChecks(tokenId);
 
         //Send the NFT to buyer,  because it's escrowed already.
@@ -794,6 +845,8 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
 
         listing.status = PropertyStatus.SOLD;
         delete pendingPurchases[tokenId];
+
+        _payoutPendingListingRewards(listing, tokenId);
 
         emit PropertySold(
             tokenId,
@@ -1077,7 +1130,11 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
      * @dev Can only be called by an account with the PROTOCOL_PARAM_TIMELOCKED_MANAGER_ROLE.
      * @param newMaxConfirmationPeriod The new maximum period in seconds.
      */
-    function setMaxConfirmationPeriod(uint256 newMaxConfirmationPeriod) external onlyProtocolParamTimelockedManager whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION()) {
+    function setMaxConfirmationPeriod(uint256 newMaxConfirmationPeriod)
+        external
+        onlyProtocolParamTimelockedManager
+        whenFunctionActive(adminControl.PROTOCOL_PARAM_CONFIGURATION())
+    {
         if (newMaxConfirmationPeriod < minConfirmationPeriod) {
             revert MaxConfirmationPeriodTooLow(newMaxConfirmationPeriod, minConfirmationPeriod);
         }
@@ -1119,7 +1176,11 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         emit OfferReviewPeriodSet(oldOfferReviewPeriod, newOfferReviewPeriod);
     }
 
-    function setManageLifePropertyNFTContract(IManageLifePropertyNFT newPropertyNFTContract) external onlyAdmin whenFunctionActive(adminControl.PROTOCOL_WIRING_CONFIGURATION()) {
+    function setManageLifePropertyNFTContract(IManageLifePropertyNFT newPropertyNFTContract)
+        external
+        onlyAdmin
+        whenFunctionActive(adminControl.PROTOCOL_WIRING_CONFIGURATION())
+    {
         if (address(newPropertyNFTContract) == address(0)) {
             revert ZeroAddress();
         }
@@ -1135,13 +1196,25 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         emit ManageLifePropertyNFTContractUpdated(oldManageLifePropertyNFTContract, address(newPropertyNFTContract));
     }
 
-    function setAdminControl(IAdminControl newAdminControl) external onlyAdmin whenFunctionActive(adminControl.PROTOCOL_WIRING_CONFIGURATION()) {
+    function setAdminControl(IAdminControl newAdminControl)
+        external
+        onlyAdmin
+        whenFunctionActive(adminControl.PROTOCOL_WIRING_CONFIGURATION())
+    {
         if (address(newAdminControl) == address(0)) {
             revert ZeroAddress();
         }
         address oldAdminControl = address(adminControl);
         adminControl = newAdminControl;
         emit AdminControlUpdated(oldAdminControl, address(newAdminControl));
+    }
+
+    function setRewardsManager(IRewardsManager newRewardsManager)
+        external
+        onlyAdmin
+        whenFunctionActive(adminControl.PROTOCOL_WIRING_CONFIGURATION())
+    {
+        _setRewardsManager(newRewardsManager);
     }
 
     //View functions
@@ -1180,6 +1253,37 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
             listing.confirmationPeriod,
             listing.reviewingOffersUntil
         );
+    }
+
+    /**
+     * @notice Calculates the claimable listing rewards for a given property listing
+     * @dev Rewards can be claimed while the property is listed or pending confirmation.
+     * @param tokenId The ID of the NFT.
+     * @return The amount of rewards that can be claimed.
+     */
+    function getClaimableListingRewards(uint256 tokenId) external view returns (uint256) {
+        if (address(rewardsManager) == address(0)) {
+            return 0; //Rewards not enabled
+        }
+        PropertyListing storage listing = listings[tokenId];
+        if (listing.status != PropertyStatus.LISTED && listing.status != PropertyStatus.PENDING_SELLER_CONFIRMATION) {
+            return 0; //If the property is not listed or pending confirmation, you can't claim rewards.
+        }
+        uint256 rewardRate = rewardsManager.listingRewardPerSecond();
+        return (block.timestamp - listing.lastListingRewardClaimed) * rewardRate;
+    }
+
+    /**
+     * @notice Allows a seller to claim their accumulated listing rewards.
+     * @dev This function will transfer the rewards and update the last claim timestamp.
+     * @param tokenId The ID of the NFT.
+     */
+    function claimListingRewards(uint256 tokenId) external nonReentrant onlySellerCanCall(tokenId) {
+        PropertyListing storage listing = listings[tokenId];
+        if (listing.status != PropertyStatus.LISTED && listing.status != PropertyStatus.PENDING_SELLER_CONFIRMATION) {
+            revert TokenNotListed(tokenId);
+        }
+        _payoutPendingListingRewards(listing, tokenId);
     }
 
     //ERC721Receiver interface
@@ -1291,6 +1395,7 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         listing.listTimestamp = uint64(block.timestamp);
         listing.lastRenewed = uint64(block.timestamp);
         listing.confirmationPeriod = period;
+        listing.lastListingRewardClaimed = block.timestamp;
 
         if (
             !manageLifePropertyNFT.isApprovedForAll(msg.sender, address(this))
@@ -1472,7 +1577,13 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
 
         uint256 fees = 0;
         uint256 netValue = purchase.price;
-        if (purchase.fee > 0 && purchase.feeCollector != address(0)) {
+
+        bool isExemptFromSalesFee = false;
+        if (address(rewardsManager) != address(0)) {
+            isExemptFromSalesFee = rewardsManager.isExemptFromSalesFee(purchase.paymentToken);
+        }
+
+        if (!isExemptFromSalesFee && purchase.fee > 0 && purchase.feeCollector != address(0)) {
             fees = (purchase.price * purchase.fee) / PERCENTAGE_BASE;
             netValue = purchase.price - fees;
         }
@@ -1535,5 +1646,46 @@ contract PropertyMarket is ReentrancyGuard, ERC721Holder,RescueERC20Timelock {
         }
         listingVersions[tokenId] = currentVersion + 1;
         listing.lastRenewed = uint64(block.timestamp);
+    }
+
+    function _setRewardsManager(IRewardsManager _rewardsManager) internal {
+        if (address(_rewardsManager) == address(0)) {
+            revert ZeroAddress();
+        }
+
+        IAdminControl rewardsManagerAdminControl = _rewardsManager.adminControl();
+        if (address(rewardsManagerAdminControl) != address(adminControl)) {
+            revert AdminControlMismatch(address(rewardsManagerAdminControl), address(adminControl));
+        }
+        address propertyMarketContractOnRewardsManager = _rewardsManager.propertyMarketContract();
+        if (address(propertyMarketContractOnRewardsManager) != address(this)) {
+            revert PropertyMarketContractMismatch(address(propertyMarketContractOnRewardsManager), address(this));
+        }
+        address oldRewardsManager = address(rewardsManager);
+        rewardsManager = _rewardsManager;
+        emit RewardsManagerUpdated(oldRewardsManager, address(_rewardsManager));
+    }
+
+    /**
+     * @notice Internal function to calculate and distribute pending listing rewards.
+     * @dev This does not update the claim timestamp; the caller is responsible for that.
+     * @param listing The listing object.
+     */
+    function _payoutPendingListingRewards(PropertyListing storage listing, uint256 tokenId) internal {
+        if (address(rewardsManager) == address(0)) {
+            return; //Rewards not enabled
+        }
+        uint256 claimableDuration = block.timestamp - listing.lastListingRewardClaimed;
+        if (claimableDuration > 0) {
+            uint256 rewardRate = rewardsManager.listingRewardPerSecond();
+            if (rewardRate > 0) {
+                uint256 amount = claimableDuration * rewardRate;
+                if (amount > 0) {
+                    listing.lastListingRewardClaimed = block.timestamp;
+                    emit ListingRewardClaimTimestampUpdated(tokenId, listing.lastListingRewardClaimed);
+                    rewardsManager.distributeListingRewards(listing.seller, amount);
+                }
+            }
+        }
     }
 }
