@@ -89,7 +89,6 @@ contract RewardsManager is RescueERC20Timelock {
     error OnlyProtocolParamManagerCanCall();
 
     error AdminControlMismatch(address adminOnRewardsManager, address adminOnPropertyManager);
-    error ZeroAddress();
 
     /**
      * @notice Initializes the RewardsManager contract.
