@@ -1,0 +1,261 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.20;
+
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
+
+/// @title AdminControl - Core contract for system administration and configuration
+/// @notice Manages system roles, fees, KYC verification, and reward parameters
+/// @dev Implements role-based access control and emergency pause functionality
+contract AdminControl is AccessControl, Pausable {
+    // Rename these events to avoid conflicts with AccessControl contract events
+    event AdminRoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
+    event AdminRoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
+    using EnumerableSet for EnumerableSet.AddressSet;
+    
+    // ========== Role Definitions ==========
+    bytes32 public constant PROTOCOL_PARAM_MANAGER_ROLE = keccak256("PROTOCOL_PARAM_MANAGER_ROLE");
+    bytes32 public constant KYC_ROLE = keccak256("KYC_ROLE");
+    bytes32 public constant REWARD_MANAGER_ROLE = keccak256("REWARD_MANAGER_ROLE");
+    bytes32 public constant NFT_PROPERTY_MANAGER_ROLE = keccak256("NFT_PROPERTY_MANAGER_ROLE");
+
+    // ========== Constants ==========
+    uint256 public constant BASIS_POINTS = 10000; // Base for percentage calculations (100% = 10000, 1% = 100)
+    
+    // ========== Fee Structure ==========
+    struct FeeSettings {
+        uint256 baseFee;        // Base transaction fee rate (basis points: 100 = 1%)
+        uint256 maxFee;         // Maximum allowed fee rate (basis points)
+        address feeCollector;   // Fee collection address
+    }
+
+    // ========== Reward Parameters Structure ==========
+    struct RewardParameters {
+        uint256 baseRate;              // Base reward rate (basis points)
+        uint256 communityMultiplier;   // Community bonus multiplier
+        uint256 maxLeaseBonus;         // Maximum lease duration bonus
+        address rewardsVault;          // Rewards vault address
+    }
+
+    // ========== State Variables ==========
+    FeeSettings public feeConfig;
+    RewardParameters public rewardParams;
+    
+    EnumerableSet.AddressSet private _kycVerified;
+    mapping(address => uint256) public communityScores;
+    mapping(uint256 => bool) public functionPaused;
+
+    // ========== Event Definitions ==========
+    event FeeConfigUpdated(uint256 oldBaseFee, uint256 newBaseFee, uint256 oldMaxFee, uint256 newMaxFee, address indexed admin);
+    event RewardParametersUpdated(uint256 oldBaseRate, uint256 newBaseRate, uint256 oldMultiplier, uint256 newMultiplier, address indexed admin);
+    event KYCStatusUpdated(address indexed account, bool approved);
+    event CommunityScoreUpdated(address indexed user, uint256 oldScore, uint256 newScore);
+
+
+    function _initializeRoles(address admin) internal {
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(PROTOCOL_PARAM_MANAGER_ROLE, admin);
+        _grantRole(KYC_ROLE, admin);
+        _grantRole(REWARD_MANAGER_ROLE, admin);
+        _grantRole(NFT_PROPERTY_MANAGER_ROLE, admin);
+    }
+
+    constructor(
+        address initialAdmin,
+        address feeCollector,
+        address rewardsVault
+    ) {
+        require(feeCollector != address(0), "Invalid fee collector address");
+        require(rewardsVault != address(0), "Invalid rewards vault address");
+        require(initialAdmin != address(0), "Invalid admin address");
+        
+        // Initialize role assignments
+        _initializeRoles(initialAdmin);
+
+        // Initialize fee configuration
+        feeConfig = FeeSettings({
+            baseFee: 200,       // 2%
+            maxFee: 1000,       // 10%
+            feeCollector: feeCollector
+        });
+
+        // Initialize reward parameters
+        rewardParams = RewardParameters({
+            baseRate: 1000,     // 10% base reward
+            communityMultiplier: 2000, // 20% max community bonus
+            maxLeaseBonus: 300, // 3% max lease bonus
+            rewardsVault: rewardsVault
+        });
+    }
+
+    // ========== Fee Management ==========
+    /// @notice Updates the fee configuration for the system
+    /// @dev Only callable by accounts with PROTOCOL_PARAM_MANAGER_ROLE (governance-managed)
+    /// @param newBaseFee New base fee rate in basis points (100 = 1%)
+    /// @param newCollector New address to collect fees
+    function updateFeeConfig(
+        uint256 newBaseFee, 
+        address newCollector
+    ) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) {
+        require(newCollector != address(0), "Invalid fee collector address");
+        require(newBaseFee <= feeConfig.maxFee, "Exceeds max fee");
+        
+        uint256 oldBase = feeConfig.baseFee;
+        uint256 oldMax = feeConfig.maxFee;
+        
+        feeConfig.baseFee = newBaseFee;
+        feeConfig.feeCollector = newCollector;
+        
+        emit FeeConfigUpdated(oldBase, newBaseFee, oldMax, feeConfig.maxFee, msg.sender);
+    }
+
+    // ========== KYC Management ==========
+    /// @notice Batch approves or revokes KYC verification for multiple accounts
+    /// @dev Only callable by accounts with KYC_ROLE (governance-managed)
+    /// @param accounts Array of addresses to update KYC status
+    /// @param approved True to approve, false to revoke KYC status
+    function batchApproveKYC(
+        address[] calldata accounts, 
+        bool approved
+    ) external onlyRole(KYC_ROLE) {
+        uint256 length = accounts.length;
+        for(uint256 i = 0; i < length;) {
+            address account = accounts[i];
+            if (approved) {
+                _kycVerified.add(account);
+            } else {
+                _kycVerified.remove(account);
+            }
+            emit KYCStatusUpdated(account, approved);
+            unchecked { ++i; }
+        }
+    }
+
+    // ========== Reward Management ==========
+    /// @notice Configures the reward parameters for the system
+    /// @dev Only callable by accounts with REWARD_MANAGER role
+    /// @param newBaseRate New base reward rate in basis points
+    /// @param newMultiplier New community multiplier for rewards
+    /// @param newLeaseBonus New maximum lease bonus percentage
+    function configureRewards(
+        uint256 newBaseRate,
+        uint256 newMultiplier,
+        uint256 newLeaseBonus
+    ) external onlyRole(REWARD_MANAGER_ROLE) {
+        require(rewardParams.rewardsVault != address(0), "Rewards vault not set");
+        require(newBaseRate <= 2000, "Base rate >20%");
+        require(newMultiplier <= 2000, "Multiplier >20%");
+        require(newLeaseBonus <= 500, "Lease bonus >5%");
+
+        uint256 oldRate = rewardParams.baseRate;
+        uint256 oldMulti = rewardParams.communityMultiplier;
+        
+        rewardParams.baseRate = newBaseRate;
+        rewardParams.communityMultiplier = newMultiplier;
+        rewardParams.maxLeaseBonus = newLeaseBonus;
+        
+        emit RewardParametersUpdated(oldRate, newBaseRate, oldMulti, newMultiplier, msg.sender);
+    }
+
+    // ========== Emergency Controls ==========
+    /// @notice Pauses or unpauses a specific function in emergency situations
+    /// @dev Only callable by accounts with DEFAULT_ADMIN_ROLE
+    /// @param functionId ID of the function to pause/unpause
+    /// @param paused True to pause, false to unpause
+    function emergencyPauseFunction(
+        uint256 functionId, 
+        bool paused
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        functionPaused[functionId] = paused;
+    }
+
+    /// @notice Pauses all contract operations in emergency situations
+    /// @dev Only callable by accounts with DEFAULT_ADMIN_ROLE
+    function globalPause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    /// @notice Resumes all contract operations after emergency pause
+    /// @dev Only callable by accounts with DEFAULT_ADMIN_ROLE
+    function globalUnpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
+    }
+
+    // ========== Community Score Management ==========
+    /// @notice Updates a user's community score
+    /// @dev Only callable by accounts with PROTOCOL_PARAM_MANAGER_ROLE (governance-managed)
+    /// @param user Address of the user to update score
+    /// @param scoreDelta Amount to change the score by
+    /// @param isAddition True to add score, false to subtract
+    function updateCommunityScore(
+        address user, 
+        uint256 scoreDelta, 
+        bool isAddition
+    ) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) {
+        uint256 oldScore = communityScores[user];
+        uint256 newScore;
+        
+        if(isAddition) {
+            newScore = oldScore + scoreDelta;
+        } else {
+            newScore = oldScore > scoreDelta ? oldScore - scoreDelta : 0;
+        }
+        
+        communityScores[user] = newScore;
+        emit CommunityScoreUpdated(user, oldScore, newScore);
+    }
+
+    // ========== View Functions ==========
+    /// @notice Gets the current base fee rate
+    /// @return Current base fee rate in basis points
+    function getCurrentFee() external view returns (uint256) {
+        return feeConfig.baseFee;
+    }
+
+    /// @notice Checks if an account is KYC verified
+    /// @param account Address to check KYC status
+    /// @return True if account is KYC verified
+    function isKYCVerified(address account) external view returns (bool) {
+        return _kycVerified.contains(account);
+    }
+
+    /// @notice Calculates total rewards for a user including all bonuses
+    /// @dev Includes base rate, lease bonus and community bonus
+    /// @param user Address of the user to calculate rewards for
+    /// @param baseAmount Base amount to calculate rewards on
+    /// @return Total reward amount including all bonuses
+    function calculateRewards(
+        address user, 
+        uint256 baseAmount
+    ) external view returns (uint256) {
+        uint256 leaseBonus = _getLeaseBonus(user);
+        uint256 communityBonus = _getCommunityBonus(user);
+        return baseAmount * (rewardParams.baseRate + leaseBonus + communityBonus) / BASIS_POINTS;
+    }
+
+    // ========== Internal Functions ==========
+    /// @notice Gets lease bonus for a user
+    /// @dev Implementation roadmap: integrate with lease duration tracking
+    /// @return Lease bonus in basis points
+    function _getLeaseBonus(address /*user*/) internal view returns (uint256) {
+        // TODO: Implement actual lease duration calculation
+        return rewardParams.maxLeaseBonus;
+    }
+
+    /// @notice Gets community bonus for a user based on their score
+    /// @param user Address of the user
+    /// @return Community bonus in basis points
+    function _getCommunityBonus(address user) internal view returns (uint256) {
+        uint256 score = communityScores[user];
+        return score > rewardParams.communityMultiplier ? 
+            rewardParams.communityMultiplier : score;
+    }
+
+    /// @notice Modifier to check if a function is active
+    /// @param functionId ID of the function to check
+    modifier whenFunctionActive(uint256 functionId) {
+        require(!functionPaused[functionId], "Function paused");
+        _;
+    }
+}
