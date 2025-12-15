@@ -4,7 +4,7 @@ pragma solidity 0.8.20;
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+
 import "../../libraries/StakingConstants.sol";
 
 // Admin control interface
@@ -16,28 +16,28 @@ interface IAdminControl {
 /// @notice Implements a staking mechanism where users can stake tokens and earn rewards
 /// @dev Inherits from Ownable for access control and ReentrancyGuard for security
 contract BaseRewards is Ownable, ReentrancyGuard {
-    using SafeMath for uint256; // Enhanced overflow protection
+
     uint256 public constant MIN_STAKING_PERIOD = StakingConstants.MIN_STAKING_PERIOD;
     uint256 public constant BASIS_POINTS = 10000;
     uint256 public constant MAX_STAKING_DAYS = 3650; // 10 years
     uint256 public constant MAX_REWARD_AMOUNT = 1e30; // Maximum reward cap
-    
+
     // Decimal handling
     uint256 public immutable stakingTokenUnit;
     uint256 public immutable rewardsTokenUnit;
-    
+
     ERC20 public immutable stakingToken;
     ERC20 public immutable rewardsToken;
-    
+
     IAdminControl public adminControl;
-    
+
     // Reward configuration
     struct RewardConfig {
         uint256 baseRewardRate;
         uint256 communityBonusRate;
         uint256 leaseBonusRate;
     }
-    
+
     RewardConfig public rewardConfig;
 
     // Reward rate parameters
@@ -46,7 +46,7 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         uint256 startTime;
         uint256 endTime;
     }
-    
+
     RewardPeriod[] public rewardPeriods;
     uint256 public rewardPerTokenStored;
     uint256 public lastUpdateTime;
@@ -76,6 +76,21 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     event RewardRateUpdated(uint256 oldRate, uint256 newRate, address indexed admin);
     event TokensRescued(address indexed token, uint256 amount, address indexed admin);
 
+    // --- Timelock Governance ---
+    address public timelock;
+    event TimelockSet(address indexed oldTimelock, address indexed newTimelock);
+
+    modifier onlyTimelock() {
+        require(msg.sender == timelock, "Timelock required");
+        _;
+    }
+
+    function setTimelock(address newTimelock) external onlyOwner {
+        require(newTimelock != address(0), "Invalid timelock");
+        emit TimelockSet(timelock, newTimelock);
+        timelock = newTimelock;
+    }
+
     constructor(
         address _stakingToken,
         address _rewardsToken,
@@ -83,31 +98,31 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     ) Ownable() {
         require(_stakingToken != address(0), "Invalid staking token address");
         require(_rewardsToken != address(0), "Invalid rewards token address");
-        
+
         stakingToken = ERC20(_stakingToken);
         rewardsToken = ERC20(_rewardsToken);
-    
+
         // Initialize immutable variables directly in constructor without using try/catch
         uint256 _stakingTokenUnit;
         uint256 _rewardsTokenUnit;
-        
+
         // Get token decimals using temporary variables
         try stakingToken.decimals() returns (uint8 decimals) {
             _stakingTokenUnit = 10 ** uint256(decimals);
         } catch {
             _stakingTokenUnit = 1e18;
         }
-        
+
         try rewardsToken.decimals() returns (uint8 decimals) {
             _rewardsTokenUnit = 10 ** uint256(decimals);
         } catch {
             _rewardsTokenUnit = 1e18;
         }
-        
+
         // Initialize immutable variables using temporary values
         stakingTokenUnit = _stakingTokenUnit;
         rewardsTokenUnit = _rewardsTokenUnit;
-        
+
         // Transfer ownership
         if (initialOwner != address(0) && initialOwner != msg.sender) {
             _transferOwnership(initialOwner);
@@ -120,24 +135,24 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     /// @param amount Amount of tokens to stake
     function stake(uint256 amount) external nonReentrant updateReward(msg.sender) {
         require(amount > 0, "Cannot stake 0");
-        
+
         // Check if rewards pool has sufficient tokens
         require(rewardsToken.balanceOf(address(this)) > 0, "Rewards pool is empty");
-        
+
         // Transfer tokens first to ensure the transaction succeeds before updating state
         uint256 balanceBefore = stakingToken.balanceOf(address(this));
         require(stakingToken.transferFrom(msg.sender, address(this), amount), "Token transfer failed");
         uint256 balanceAfter = stakingToken.balanceOf(address(this));
-        
+
         // Verify the actual amount received
         uint256 amountReceived = balanceAfter - balanceBefore;
         require(amountReceived == amount, "Incorrect amount received");
-        
+
         // Update state variables
         _totalSupply = _totalSupply + amountReceived;
         _balances[msg.sender] = _balances[msg.sender] + amountReceived;
         _stakeTimestamps[msg.sender] = block.timestamp;
-        
+
         emit Staked(msg.sender, amountReceived);
     }
 
@@ -147,14 +162,14 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     function withdraw(uint256 amount) public nonReentrant updateReward(msg.sender) {
         require(block.timestamp >= _stakeTimestamps[msg.sender] + minStakingPeriod, "Minimum staking period not met");
         require(amount > 0, "Cannot withdraw 0");
-        // Explicit balance check using SafeMath
+        // Explicit balance check
         uint256 currentBalance = _balances[msg.sender];
         require(currentBalance >= amount, "Insufficient staked balance");
-        
+
         // Native subtraction with automatic underflow protection in Solidity 0.8.20
         _balances[msg.sender] = currentBalance - amount;
         _totalSupply = _totalSupply - amount;
-        
+
         // Maintain checks-effects-interactions pattern
         require(stakingToken.transfer(msg.sender, amount), "Token transfer failed");
         emit Withdrawn(msg.sender, amount);
@@ -180,48 +195,48 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         emit RewardExpired(account, expiredAmount);
     }
 
-    function setMinStakingPeriod(uint256 period) external onlyOwner {
+    function setMinStakingPeriod(uint256 period) external onlyTimelock {
         minStakingPeriod = period;
         emit MinStakingPeriodUpdated(period);
     }
 
     /******************** Management Functions ********************/
     /// @notice Sets the reward rate for the staking contract
-    /// @dev Only callable by contract owner
+    /// @dev Only callable by timelock (governance)
     /// @param _rewardRate New reward rate per second
-    function setRewardRate(uint256 _rewardRate) external onlyOwner updateReward(address(0)) {
+    function setRewardRate(uint256 _rewardRate) external onlyTimelock updateReward(address(0)) {
         require(!rateChangePaused, "Circuit breaker active: rate changes paused");
         require(_rewardRate <= MAX_REWARD_RATE, "Reward rate exceeds maximum");
         require(block.timestamp >= lastRateChange + RATE_CHANGE_COOLDOWN, "Rate change cooldown active");
-        
+
         uint256 oldRate = rewardPeriods.length > 0 ? rewardPeriods[rewardPeriods.length - 1].rate : 0;
-        
+
         if (rewardPeriods.length > 0) {
             RewardPeriod storage lastPeriod = rewardPeriods[rewardPeriods.length - 1];
             if (lastPeriod.endTime > block.timestamp) {
                 lastPeriod.endTime = block.timestamp;
             }
         }
-        
+
         rewardPeriods.push(RewardPeriod({
             rate: _rewardRate,
             startTime: block.timestamp,
             endTime: type(uint256).max
         }));
-        
+
         lastRateChange = block.timestamp;
         emit RewardRateUpdated(oldRate, _rewardRate, msg.sender);
     }
 
-    function pauseRateChanges() external onlyOwner {
+    function pauseRateChanges() external onlyTimelock {
         rateChangePaused = true;
     }
 
-    function unpauseRateChanges() external onlyOwner {
+    function unpauseRateChanges() external onlyTimelock {
         rateChangePaused = false;
     }
 
-    function rescueTokens(address token, uint256 amount) external onlyOwner {
+    function rescueTokens(address token, uint256 amount) external onlyTimelock {
         require(token != address(stakingToken), "Cannot rescue staking token");
         require(ERC20(token).transfer(msg.sender, amount), "Token transfer failed");
         emit TokensRescued(token, amount, msg.sender);
@@ -259,7 +274,7 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         if (_totalSupply == 0 || lastUpdateTime == 0) {
             return rewardPerTokenStored;
         }
-        
+
         uint256 totalAdditionalReward = 0;
         uint256 periodsLength = rewardPeriods.length;
         uint256 processedPeriods = 0;
@@ -267,19 +282,19 @@ contract BaseRewards is Ownable, ReentrancyGuard {
             RewardPeriod memory period = rewardPeriods[i];
             uint256 periodEndTime = period.endTime;
             uint256 periodStartTime = period.startTime;
-            
+
             if (periodEndTime > lastUpdateTime) {
                 uint256 periodStart = periodStartTime > lastUpdateTime ? periodStartTime : lastUpdateTime;
                 uint256 periodEnd = periodEndTime < block.timestamp ? periodEndTime : block.timestamp;
-                
+
                 if (periodEnd > periodStart) {
                     uint256 periodDuration = periodEnd - periodStart;
                     uint256 periodRate = period.rate;
-                    
+
                     totalAdditionalReward = totalAdditionalReward + (
                         periodRate * periodDuration * rewardsTokenUnit / _totalSupply
                     );
-                    
+
                     if (++processedPeriods >= MAX_PERIODS_PROCESSED) {
                         break;
                     }
@@ -290,7 +305,7 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     }
 
     /// @notice Calculates rewards for a user based on their staking and community participation
-    /// @dev Uses safe math operations to prevent overflow and optimized calculations
+    /// @dev Uses Solidity 0.8 checked arithmetic with explicit caps
     /// @param user The address of the user
     /// @param stakingAmount The amount of tokens staked by the user
     /// @param stakingDuration The duration of staking in seconds
@@ -303,54 +318,54 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         require(user != address(0), "Invalid user address");
         require(stakingAmount > 0, "Invalid staking amount");
         require(stakingDuration > 0, "Invalid staking duration");
-        
+
         // Get base reward rate with overflow protection
         uint256 baseRate = rewardConfig.baseRewardRate;
         require(baseRate > 0, "Base reward rate not set");
-        
+
         // Calculate base reward with overflow checks
         // Use intermediate calculations to prevent overflow
         uint256 timeMultiplier = stakingDuration / 1 days; // Convert to days
         require(timeMultiplier <= MAX_STAKING_DAYS, "Staking duration too long");
-        
-        // Enhanced safe multiplication with SafeMath and overflow protection
+
+        // Base reward computed with checked arithmetic (Solidity 0.8+)
         uint256 baseReward;
 
-        // Use SafeMath for all calculations to ensure maximum safety
+        // Use native checked arithmetic; overflow reverts automatically in 0.8+
         try this._safeCalculateBaseReward(stakingAmount, baseRate, timeMultiplier) returns (uint256 result) {
             baseReward = result;
         } catch {
             revert("Base reward calculation overflow");
         }
-        
+
         // Get community bonus with safe calculations
         uint256 communityBonus = _calculateCommunityBonus(user, baseReward);
-        
+
         // Get lease bonus with safe calculations
         uint256 leaseBonus = _calculateLeaseBonus(user, baseReward);
-        
+
         // Safe addition with overflow check
         totalReward = baseReward;
         if (totalReward > type(uint256).max - communityBonus) {
             revert("Total reward calculation overflow");
         }
         totalReward += communityBonus;
-        
+
         if (totalReward > type(uint256).max - leaseBonus) {
             revert("Total reward calculation overflow");
         }
         totalReward += leaseBonus;
-        
+
         // Apply maximum reward cap
         if (totalReward > MAX_REWARD_AMOUNT) {
             totalReward = MAX_REWARD_AMOUNT;
         }
-        
+
         return totalReward;
     }
 
     /// @notice Safe calculation helper for base rewards (external for try-catch)
-    /// @dev Uses SafeMath for enhanced overflow protection
+    /// @dev Uses Solidity 0.8 checked arithmetic (overflow reverts), retains external call pattern for parity
     /// @param stakingAmount The staking amount
     /// @param baseRate The base reward rate
     /// @param timeMultiplier The time multiplier
@@ -361,9 +376,9 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         require(baseRate > 0, "Invalid base rate");
         require(timeMultiplier > 0, "Invalid time multiplier");
 
-        // Use SafeMath for maximum safety
-        uint256 intermediate = stakingAmount.mul(baseRate);
-        result = intermediate.mul(timeMultiplier).div(BASIS_POINTS);
+        // Use native checked arithmetic under Solidity 0.8+
+        uint256 intermediate = stakingAmount * baseRate;
+        result = (intermediate * timeMultiplier) / BASIS_POINTS;
 
         // Additional sanity check
         require(result <= MAX_REWARD_AMOUNT, "Result exceeds maximum reward");
@@ -381,12 +396,12 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         if (communityScore == 0) {
             return 0;
         }
-        
+
         uint256 bonusRate = rewardConfig.communityBonusRate;
         if (bonusRate == 0) {
             return 0;
         }
-        
+
         // Safe calculation with overflow protection
         unchecked {
             if (baseReward > type(uint256).max / bonusRate) {
@@ -394,10 +409,10 @@ contract BaseRewards is Ownable, ReentrancyGuard {
             }
             bonus = (baseReward * bonusRate * communityScore) / (BASIS_POINTS * 100);
         }
-        
+
         return bonus;
     }
-    
+
     /// @notice Calculates lease participation bonus
     /// @dev Internal function with optimized calculations
     /// @param user The user address
@@ -409,12 +424,12 @@ contract BaseRewards is Ownable, ReentrancyGuard {
         if (!hasActiveLeases) {
             return 0;
         }
-        
+
         uint256 bonusRate = rewardConfig.leaseBonusRate;
         if (bonusRate == 0) {
             return 0;
         }
-        
+
         // Safe calculation with overflow protection
         unchecked {
             if (baseReward > type(uint256).max / bonusRate) {
@@ -422,10 +437,10 @@ contract BaseRewards is Ownable, ReentrancyGuard {
             }
             bonus = (baseReward * bonusRate) / BASIS_POINTS;
         }
-        
+
         return bonus;
     }
-    
+
     /// @notice Checks if user has active leases
     /// @dev Internal helper function
     /// @param user The user address
@@ -440,11 +455,11 @@ contract BaseRewards is Ownable, ReentrancyGuard {
     modifier updateReward(address account) {
         // Store current reward per token value
         uint256 currentRewardPerToken = rewardPerToken();
-        
+
         // Update stored values
         rewardPerTokenStored = currentRewardPerToken;
         lastUpdateTime = block.timestamp;
-        
+
         // Update account-specific reward data if account is valid
         if (account != address(0)) {
             // Calculate and store earned rewards

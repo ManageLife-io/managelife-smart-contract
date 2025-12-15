@@ -43,7 +43,7 @@ contract ManageLifePropertyNFTController{
     error InvalidBatchSize(uint256 batchSize, uint256 maxBatchSize);
     /// @notice Thrown when the input arrays for a batch operation do not have the same length.
     error InvalidBatchDataInputs();
-    
+
     /// @notice Thrown when trying to set a new NFT contract that points to a different controller, when it should be this contract.
     /// @param controllerOnNftContract The controller address on the new NFT contract.
     error newNFTContractHasDifferentController(address controllerOnNftContract);
@@ -78,7 +78,7 @@ contract ManageLifePropertyNFTController{
         }
         _;
     }
-    
+
     /// @notice Modifier to restrict function access to NFT Property Managers only.
     modifier onlyNftPropertyManager() {
         if (!adminController.hasRole(adminController.NFT_PROPERTY_MANAGER_ROLE(), msg.sender)) {
@@ -87,11 +87,20 @@ contract ManageLifePropertyNFTController{
         _;
     }
 
+    /// @notice Restricts caller to the TimelockController defined in AdminControl
+    modifier onlyTimelock() {
+        if (address(adminController.timelock()) != msg.sender) {
+            revert NotAdmin();
+        }
+        _;
+    }
+
+
     // ============ Admin Functions ============
     /// @notice Updates the AdminControl contract address.
     /// @dev This function can only be called by a default admin.
     /// @param newController The new AdminControl contract instance.
-    function setAdminController(IAdminControl newController) external onlyAdmin {
+    function setAdminController(IAdminControl newController) external onlyAdmin onlyTimelock {
         if (address(newController) == address(0)) {
             revert ZeroAddress();
         }
@@ -112,7 +121,7 @@ contract ManageLifePropertyNFTController{
     /// @dev This function can only be called by a default admin.
     /// The new NFT contract must have this contract as its controller and the same admin controller.
     /// @param newPropertyNFTContract The new ManageLifePropertyNFT contract instance.
-    function setManageLifePropertyNFTContract(IManageLifePropertyNFT newPropertyNFTContract) external onlyAdmin {
+    function setManageLifePropertyNFTContract(IManageLifePropertyNFT newPropertyNFTContract) external onlyAdmin onlyTimelock {
         if (address(newPropertyNFTContract) == address(0)) {
             revert ZeroAddress();
         }
@@ -143,7 +152,7 @@ contract ManageLifePropertyNFTController{
     /// @param deedHeldAtManageLife An array of booleans indicating if the deeds are held by ManageLife.
     /// @return tokenIds An array of the newly minted token IDs.
     function mintBatch(address[] calldata recipients, bool[] calldata deedHeldAtManageLife) external onlyNftPropertyManager returns (uint256[] memory) {
- 
+
         if (recipients.length > MAX_BATCH_SIZE) {
             revert InvalidBatchSize(recipients.length, MAX_BATCH_SIZE);
         }

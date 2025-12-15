@@ -79,6 +79,15 @@ contract ManageLifePropertyNFT is ERC721 {
         _;
     }
 
+    /// @notice Restricts caller to the TimelockController defined in adminController
+    modifier onlyTimelock() {
+        if (address(adminController.timelock()) != msg.sender) {
+            revert NotAdmin();
+        }
+        _;
+    }
+
+
     /// @notice Deploys the collection with admin/controller wiring and an initial base URI.
     /// @dev `_baseUri` is normalized to a single trailing '/'.
     /// @param name ERC-721 name.
@@ -143,7 +152,7 @@ contract ManageLifePropertyNFT is ERC721 {
     /// @notice Sets the property controller contract address.
     /// @dev Only `DEFAULT_ADMIN_ROLE`. Reverts on zero address.
     /// @param newPropertyController The new controller address.
-    function setPropertyControllerContract(address newPropertyController) external onlyAdmin {
+    function setPropertyControllerContract(address newPropertyController) external onlyAdmin onlyTimelock {
         if (newPropertyController == address(0)) revert ZeroAddress();
         // Enforce controller <-> NFT mutual wiring and admin consistency
         IManageLifePropertyNFTController ctrl = IManageLifePropertyNFTController(newPropertyController);
@@ -157,7 +166,7 @@ contract ManageLifePropertyNFT is ERC721 {
     /// @notice Sets the admin controller contract address.
     /// @dev Only `DEFAULT_ADMIN_ROLE`. Reverts on zero address.
     /// @param newAdminController The new admin controller address.
-    function setAdminController(address newAdminController) external onlyAdmin {
+    function setAdminController(address newAdminController) external onlyAdmin onlyTimelock {
         if (newAdminController == address(0)) revert ZeroAddress();
         // If a controller is set, require it uses the same AdminControl for consistency
         if (propertyControllerContract != address(0)) {
@@ -175,7 +184,7 @@ contract ManageLifePropertyNFT is ERC721 {
     /// @notice Updates the base token URI. Accepts inputs with or without trailing slashes.
     /// @dev Only `DEFAULT_ADMIN_ROLE`. Normalized to exactly one trailing '/' before storage.
     /// @param _baseUri New base URI string.
-    function setBaseTokenURI(string memory _baseUri) external onlyAdmin {
+    function setBaseTokenURI(string memory _baseUri) external onlyAdmin onlyTimelock {
         if (bytes(_baseUri).length == 0) revert EmptyMetadataURI();
         _baseTokenURI = _normalizeBaseUri(_baseUri);
         emit BaseTokenURISet(_baseTokenURI);

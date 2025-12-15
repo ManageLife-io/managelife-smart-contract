@@ -13,7 +13,7 @@ contract AdminControl is AccessControl, Pausable {
     event AdminRoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
     event AdminRoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
     using EnumerableSet for EnumerableSet.AddressSet;
-    
+
     // ========== Role Definitions ==========
     bytes32 public constant PROTOCOL_PARAM_MANAGER_ROLE = keccak256("PROTOCOL_PARAM_MANAGER_ROLE");
     bytes32 public constant KYC_ROLE = keccak256("KYC_ROLE");
@@ -22,7 +22,7 @@ contract AdminControl is AccessControl, Pausable {
 
     // ========== Constants ==========
     uint256 public constant BASIS_POINTS = 10000; // Base for percentage calculations (100% = 10000, 1% = 100)
-    
+
     // ========== Fee Structure ==========
     struct FeeSettings {
         uint256 baseFee;        // Base transaction fee rate (basis points: 100 = 1%)
@@ -41,10 +41,14 @@ contract AdminControl is AccessControl, Pausable {
     // ========== State Variables ==========
     FeeSettings public feeConfig;
     RewardParameters public rewardParams;
-    
+
     EnumerableSet.AddressSet private _kycVerified;
     mapping(address => uint256) public communityScores;
     mapping(uint256 => bool) public functionPaused;
+
+    address public timelock;
+    event TimelockSet(address indexed oldTimelock, address indexed newTimelock);
+    event FunctionPauseUpdated(uint256 indexed functionId, bool paused);
 
     // ========== Event Definitions ==========
     event FeeConfigUpdated(uint256 oldBaseFee, uint256 newBaseFee, uint256 oldMaxFee, uint256 newMaxFee, address indexed admin);
@@ -69,7 +73,7 @@ contract AdminControl is AccessControl, Pausable {
         require(feeCollector != address(0), "Invalid fee collector address");
         require(rewardsVault != address(0), "Invalid rewards vault address");
         require(initialAdmin != address(0), "Invalid admin address");
-        
+
         // Initialize role assignments
         _initializeRoles(initialAdmin);
 
@@ -89,24 +93,42 @@ contract AdminControl is AccessControl, Pausable {
         });
     }
 
+    modifier onlyTimelock() {
+        require(msg.sender == timelock, "Timelock required");
+        _;
+    }
+
+    /// @notice Set the TimelockController address that must execute sensitive operations
+    /// @dev Can be set once by DEFAULT_ADMIN_ROLE; subsequent updates must be performed by the timelock itself
+    function setTimelock(address newTimelock) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newTimelock != address(0), "Invalid timelock");
+        address old = timelock;
+        if (old != address(0)) {
+            require(msg.sender == old, "Only timelock can change");
+        }
+        timelock = newTimelock;
+        emit TimelockSet(old, newTimelock);
+    }
+
+
     // ========== Fee Management ==========
     /// @notice Updates the fee configuration for the system
     /// @dev Only callable by accounts with PROTOCOL_PARAM_MANAGER_ROLE (governance-managed)
     /// @param newBaseFee New base fee rate in basis points (100 = 1%)
     /// @param newCollector New address to collect fees
     function updateFeeConfig(
-        uint256 newBaseFee, 
+        uint256 newBaseFee,
         address newCollector
-    ) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) {
+    ) external onlyTimelock {
         require(newCollector != address(0), "Invalid fee collector address");
         require(newBaseFee <= feeConfig.maxFee, "Exceeds max fee");
-        
+
         uint256 oldBase = feeConfig.baseFee;
         uint256 oldMax = feeConfig.maxFee;
-        
+
         feeConfig.baseFee = newBaseFee;
         feeConfig.feeCollector = newCollector;
-        
+
         emit FeeConfigUpdated(oldBase, newBaseFee, oldMax, feeConfig.maxFee, msg.sender);
     }
 
@@ -116,7 +138,7 @@ contract AdminControl is AccessControl, Pausable {
     /// @param accounts Array of addresses to update KYC status
     /// @param approved True to approve, false to revoke KYC status
     function batchApproveKYC(
-        address[] calldata accounts, 
+        address[] calldata accounts,
         bool approved
     ) external onlyRole(KYC_ROLE) {
         uint256 length = accounts.length;
@@ -142,7 +164,7 @@ contract AdminControl is AccessControl, Pausable {
         uint256 newBaseRate,
         uint256 newMultiplier,
         uint256 newLeaseBonus
-    ) external onlyRole(REWARD_MANAGER_ROLE) {
+    ) external onlyTimelock {
         require(rewardParams.rewardsVault != address(0), "Rewards vault not set");
         require(newBaseRate <= 2000, "Base rate >20%");
         require(newMultiplier <= 2000, "Multiplier >20%");
@@ -150,11 +172,11 @@ contract AdminControl is AccessControl, Pausable {
 
         uint256 oldRate = rewardParams.baseRate;
         uint256 oldMulti = rewardParams.communityMultiplier;
-        
+
         rewardParams.baseRate = newBaseRate;
         rewardParams.communityMultiplier = newMultiplier;
         rewardParams.maxLeaseBonus = newLeaseBonus;
-        
+
         emit RewardParametersUpdated(oldRate, newBaseRate, oldMulti, newMultiplier, msg.sender);
     }
 
@@ -164,21 +186,22 @@ contract AdminControl is AccessControl, Pausable {
     /// @param functionId ID of the function to pause/unpause
     /// @param paused True to pause, false to unpause
     function emergencyPauseFunction(
-        uint256 functionId, 
+        uint256 functionId,
         bool paused
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external onlyTimelock {
         functionPaused[functionId] = paused;
+        emit FunctionPauseUpdated(functionId, paused);
     }
 
     /// @notice Pauses all contract operations in emergency situations
     /// @dev Only callable by accounts with DEFAULT_ADMIN_ROLE
-    function globalPause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function globalPause() external onlyTimelock {
         _pause();
     }
 
     /// @notice Resumes all contract operations after emergency pause
     /// @dev Only callable by accounts with DEFAULT_ADMIN_ROLE
-    function globalUnpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function globalUnpause() external onlyTimelock {
         _unpause();
     }
 
@@ -189,19 +212,19 @@ contract AdminControl is AccessControl, Pausable {
     /// @param scoreDelta Amount to change the score by
     /// @param isAddition True to add score, false to subtract
     function updateCommunityScore(
-        address user, 
-        uint256 scoreDelta, 
+        address user,
+        uint256 scoreDelta,
         bool isAddition
-    ) external onlyRole(PROTOCOL_PARAM_MANAGER_ROLE) {
+    ) external onlyTimelock {
         uint256 oldScore = communityScores[user];
         uint256 newScore;
-        
+
         if(isAddition) {
             newScore = oldScore + scoreDelta;
         } else {
             newScore = oldScore > scoreDelta ? oldScore - scoreDelta : 0;
         }
-        
+
         communityScores[user] = newScore;
         emit CommunityScoreUpdated(user, oldScore, newScore);
     }
@@ -226,7 +249,7 @@ contract AdminControl is AccessControl, Pausable {
     /// @param baseAmount Base amount to calculate rewards on
     /// @return Total reward amount including all bonuses
     function calculateRewards(
-        address user, 
+        address user,
         uint256 baseAmount
     ) external view returns (uint256) {
         uint256 leaseBonus = _getLeaseBonus(user);
@@ -248,7 +271,7 @@ contract AdminControl is AccessControl, Pausable {
     /// @return Community bonus in basis points
     function _getCommunityBonus(address user) internal view returns (uint256) {
         uint256 score = communityScores[user];
-        return score > rewardParams.communityMultiplier ? 
+        return score > rewardParams.communityMultiplier ?
             rewardParams.communityMultiplier : score;
     }
 

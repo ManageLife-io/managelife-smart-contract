@@ -5,4 +5,6 @@ interface IAdminControl {
     function hasRole(bytes32 role, address account) external view returns (bool);
     function NFT_PROPERTY_MANAGER_ROLE() external view returns (bytes32);
     function DEFAULT_ADMIN_ROLE() external view returns (bytes32);
+    function timelock() external view returns (address);
+
 }

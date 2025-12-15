@@ -70,6 +70,7 @@ contract PropertyMarketOptimized is ReentrancyGuard {
     uint256 public constant FN_CONFIRM = 6;
     uint256 public constant FN_REJECT = 7;
     uint256 public constant FN_CANCEL_EXPIRED = 8;
+    uint256 public constant FN_DELIST = 9;
     uint256 public constant FN_ADMIN_UPDATE_LISTING = 100;
     uint256 public constant FN_ALLOWED_TOKEN_UPDATE = 101;
 
@@ -79,6 +80,33 @@ contract PropertyMarketOptimized is ReentrancyGuard {
     mapping(uint256 => BiddingLibrary.Bid[]) public bidsForToken;
     mapping(address => mapping(uint256 => uint256)) public bidIndexByBidder;
     mapping(address => mapping(address => uint256)) public refundableBalances; // bidder => token => amount
+
+    // Active bids counter per tokenId (for O(1) checks)
+    mapping(uint256 => uint256) public activeBidsCount;
+
+    // MA2-23 Fix: Track highest active bid per tokenId for O(1) lookup
+    mapping(uint256 => uint256) public highestActiveBidAmount;
+
+    // Cap for active bids per token to prevent unbounded growth
+    uint256 public maxActiveBidsPerToken = 200;
+    event MaxActiveBidsPerTokenUpdated(uint256 oldValue, uint256 newValue);
+    function setMaxActiveBidsPerToken(uint256 newMax) external onlyAdmin {
+        require(newMax > 0, ErrorCodes.E501);
+        uint256 old = maxActiveBidsPerToken;
+        maxActiveBidsPerToken = newMax;
+        emit MaxActiveBidsPerTokenUpdated(old, newMax);
+    }
+
+    // Hard cap for total bids array length to prevent unbounded growth
+    uint256 public maxBidsArrayLengthPerToken = 1000;
+    event MaxBidsArrayLengthPerTokenUpdated(uint256 oldValue, uint256 newValue);
+    function setMaxBidsArrayLengthPerToken(uint256 newMax) external onlyAdmin {
+        require(newMax > 0, ErrorCodes.E501);
+        uint256 old = maxBidsArrayLengthPerToken;
+        maxBidsArrayLengthPerToken = newMax;
+        emit MaxBidsArrayLengthPerTokenUpdated(old, newMax);
+    }
+
 
 
     // Merged events to reduce contract size
@@ -97,6 +125,10 @@ contract PropertyMarketOptimized is ReentrancyGuard {
         address paymentToken,
         bool wasCompetitive
     );
+    event RefundClaimed(address indexed user, address indexed paymentToken, uint256 amount);
+    event BidsPruned(uint256 indexed tokenId, uint256 removed, uint256 remaining);
+
+
 
     event PurchaseStatusChanged(
         uint256 indexed tokenId,
@@ -109,6 +141,7 @@ contract PropertyMarketOptimized is ReentrancyGuard {
 
     event PaymentTokenUpdated(address indexed token, bool allowed);
     event EmergencyTokenWithdrawal(address indexed token, address indexed recipient, uint256 amount);
+    event PropertyDelisted(uint256 indexed tokenId, address indexed seller);
 
     error DirectEthTransferNotAllowed();
     error InvalidInput();
@@ -136,9 +169,15 @@ contract PropertyMarketOptimized is ReentrancyGuard {
 
     // ========== Token Management ==========
 
+    /// @notice Add ERC20 into payment allowlist
+    /// @dev Only add non-deflationary tokens without transfer fees; fee-on-transfer tokens can break accounting
+
     function addAllowedToken(address token) external whenSystemActive whenFunctionActive(FN_ALLOWED_TOKEN_UPDATE) onlyAdmin {
         require(token != address(0), ErrorCodes.E001);
         allowedPaymentTokens[token] = true;
+    /// @notice Remove ERC20 from payment allowlist
+    /// @dev Use this to remove tokens discovered to be deflationary/fee-on-transfer
+
         emit PaymentTokenUpdated(token, true);
     }
 
@@ -188,10 +227,18 @@ contract PropertyMarketOptimized is ReentrancyGuard {
         if (existingListing.seller != address(0) &&
             existingListing.seller != msg.sender &&
             existingListing.status == uint8(PropertyStatus.LISTED)) {
-            BiddingLibrary.cancelAllBids(bidsForToken[tokenId], bidIndexByBidder, tokenId, refundableBalances);
+            BiddingLibrary.cancelAllBids(bidsForToken[tokenId], bidIndexByBidder, tokenId, refundableBalances, activeBidsCount);
+            // MA2-23 Fix: Reset highest bid to 0 after cancelling all bids
+            highestActiveBidAmount[tokenId] = 0;
         } else if (existingListing.seller == msg.sender) {
             require(existingListing.status != uint8(PropertyStatus.LISTED), ErrorCodes.E102);
+            // MA2-21 Fix: Prevent relisting while purchase is pending confirmation
+            require(existingListing.status != uint8(PropertyStatus.PENDING_SELLER_CONFIRMATION), ErrorCodes.E603);
         }
+
+        // MA2-21 Fix: Preserve original listing timestamp if seller is unchanged and listing previously existed
+        uint64 originalListTimestamp = existingListing.listTimestamp;
+        bool preserveTimestamp = existingListing.seller == msg.sender && originalListTimestamp > 0;
 
         // Create optimized listing
         listings[tokenId] = PropertyListing({
@@ -199,7 +246,7 @@ contract PropertyMarketOptimized is ReentrancyGuard {
             paymentToken: paymentToken,
             price: price,
             tokenId: tokenId,
-            listTimestamp: uint64(block.timestamp),
+            listTimestamp: preserveTimestamp ? originalListTimestamp : uint64(block.timestamp),
             lastRenewed: uint64(block.timestamp),
             confirmationPeriod: uint32(period),
             status: uint8(PropertyStatus.LISTED)
@@ -227,13 +274,9 @@ contract PropertyMarketOptimized is ReentrancyGuard {
             listing.seller = msg.sender;
         }
 
-        // Check for active bids if payment token changed
+        // Check for active bids if payment token changed (O(1) via counter)
         if (newPaymentToken != listing.paymentToken) {
-            BiddingLibrary.Bid[] storage bids = bidsForToken[tokenId];
-            uint256 length = bids.length;
-            for (uint256 i = 0; i < length; i++) {
-                require(!bids[i].isActive, ErrorCodes.E911);
-            }
+            require(activeBidsCount[tokenId] == 0, ErrorCodes.E911);
         }
 
         listing.price = newPrice;
@@ -241,6 +284,31 @@ contract PropertyMarketOptimized is ReentrancyGuard {
         listing.lastRenewed = uint64(block.timestamp);
 
         emit ListingEvent(tokenId, msg.sender, newPrice, newPaymentToken, 1);
+    }
+
+    /**
+     * @notice Delist a property from the marketplace
+     * @dev Only the current NFT owner can delist. Cancels all active bids.
+     * @param tokenId The token ID of the property to delist
+     */
+    function delistProperty(uint256 tokenId) external nonReentrant whenSystemActive whenFunctionActive(FN_DELIST) {
+        PropertyListing storage listing = listings[tokenId];
+
+        require(
+            listing.status == uint8(PropertyStatus.LISTED) &&
+            nftiContract.ownerOf(tokenId) == msg.sender,
+            ErrorCodes.E001
+        );
+
+        // Update status to DELISTED
+        listing.status = uint8(PropertyStatus.DELISTED);
+
+        // Cancel all active bids and refund bidders
+        BiddingLibrary.cancelAllBids(bidsForToken[tokenId], bidIndexByBidder, tokenId, refundableBalances, activeBidsCount);
+        // MA2-23 Fix: Reset highest bid to 0 after cancelling all bids
+        highestActiveBidAmount[tokenId] = 0;
+
+        emit PropertyDelisted(tokenId, msg.sender);
     }
 
     // ========== Purchase Functions ==========
@@ -256,7 +324,8 @@ contract PropertyMarketOptimized is ReentrancyGuard {
             ErrorCodes.E001
         );
 
-        uint256 highestBid = BiddingLibrary.getHighestActiveBid(bidsForToken[tokenId]);
+        // MA2-23 Fix: Use O(1) lookup instead of O(n) iteration
+        uint256 highestBid = highestActiveBidAmount[tokenId];
         uint256 minimumPrice = highestBid > 0 ? highestBid : listing.price;
         require(
             offerPrice >= minimumPrice &&
@@ -308,7 +377,9 @@ contract PropertyMarketOptimized is ReentrancyGuard {
         PropertyListing storage listing = listings[tokenId];
 
         listing.status = uint8(PropertyStatus.SOLD);
-        BiddingLibrary.cancelAllBids(bidsForToken[tokenId], bidIndexByBidder, tokenId, refundableBalances);
+        BiddingLibrary.cancelAllBids(bidsForToken[tokenId], bidIndexByBidder, tokenId, refundableBalances, activeBidsCount);
+        // MA2-23 Fix: Reset highest bid to 0 after cancelling all bids
+        highestActiveBidAmount[tokenId] = 0;
 
         _processPayment(listing.seller, msg.sender, actualPrice, paymentToken);
         nftiContract.safeTransferFrom(listing.seller, msg.sender, tokenId, "");
@@ -340,7 +411,9 @@ contract PropertyMarketOptimized is ReentrancyGuard {
 
         if (accept) {
             listing.status = uint8(PropertyStatus.SOLD);
-            BiddingLibrary.cancelAllBids(bidsForToken[tokenId], bidIndexByBidder, tokenId, refundableBalances);
+            BiddingLibrary.cancelAllBids(bidsForToken[tokenId], bidIndexByBidder, tokenId, refundableBalances, activeBidsCount);
+            // MA2-23 Fix: Reset highest bid to 0 after cancelling all bids
+            highestActiveBidAmount[tokenId] = 0;
 
             _processPaymentFromBalance(listing.seller, purchase.offerPrice, purchase.paymentToken);
             nftiContract.safeTransferFrom(listing.seller, purchase.buyer, tokenId, "");
@@ -375,11 +448,17 @@ contract PropertyMarketOptimized is ReentrancyGuard {
     }
 
     // Optional: batched bid cancellation to avoid single-tx O(n) with transfers
+    // MA2-22 Fix: Added access control - only seller or admin can cancel bids in batch
     function cancelBidsBatch(
         uint256 tokenId,
         uint256 start,
         uint256 count
     ) external nonReentrant whenSystemActive whenFunctionActive(FN_BID) {
+        // MA2-22 Fix: Access control - only seller (current NFT owner) or admin can cancel bids in batch
+        bool isSeller = nftiContract.ownerOf(tokenId) == msg.sender;
+        bool isAdmin = adminControl.hasRole(adminControl.DEFAULT_ADMIN_ROLE(), msg.sender);
+        require(isSeller || isAdmin, ErrorCodes.E401);
+
         BiddingLibrary.Bid[] storage bids = bidsForToken[tokenId];
         uint256 len = bids.length;
         require(start < len, ErrorCodes.E001);
@@ -393,10 +472,15 @@ contract PropertyMarketOptimized is ReentrancyGuard {
 
                 bids[i].isActive = false;
                 bidIndexByBidder[bidder][tokenId] = 0;
+                if (activeBidsCount[tokenId] > 0) {
+                    activeBidsCount[tokenId] -= 1;
+                }
                 refundableBalances[bidder][paymentToken] += refundAmount;
                 emit BiddingLibrary.BidCancelled(tokenId, bidder, refundAmount);
             }
         }
+        // MA2-23 Fix: Recalculate highest active bid after batch cancellation
+        _recalculateHighestBid(tokenId);
     }
 
 
@@ -405,6 +489,8 @@ contract PropertyMarketOptimized is ReentrancyGuard {
     function placeBid(
         uint256 tokenId,
         uint256 bidAmount,
+
+
         address paymentToken
     ) external nonReentrant whenSystemActive whenFunctionActive(FN_BID) onlyKYCVerified {
         PropertyListing storage listing = listings[tokenId];
@@ -416,6 +502,10 @@ contract PropertyMarketOptimized is ReentrancyGuard {
             ErrorCodes.E001
         );
 
+        uint256 existingIndex = bidIndexByBidder[msg.sender][tokenId];
+        require(bidsForToken[tokenId].length < maxBidsArrayLengthPerToken, ErrorCodes.E502);
+
+        require(activeBidsCount[tokenId] < maxActiveBidsPerToken, ErrorCodes.E502);
         BiddingLibrary.placeBid(
             bidsForToken[tokenId],
             bidIndexByBidder,
@@ -425,7 +515,51 @@ contract PropertyMarketOptimized is ReentrancyGuard {
             paymentToken,
             listing.price
         );
+        if (existingIndex == 0) {
+            activeBidsCount[tokenId] += 1;
+        }
+        // MA2-23 Fix: Update highest active bid amount for O(1) lookup
+        if (bidAmount > highestActiveBidAmount[tokenId]) {
+            highestActiveBidAmount[tokenId] = bidAmount;
+        }
     }
+
+    /// @notice Prune inactive bids to keep arrays bounded and gas-efficient
+    /// @dev Processes up to maxToProcess entries; removes inactive by swap-and-pop
+    function pruneInactiveBids(uint256 tokenId, uint256 maxToProcess)
+        external
+        nonReentrant
+        whenSystemActive
+        whenFunctionActive(FN_BID)
+    {
+        BiddingLibrary.Bid[] storage bids = bidsForToken[tokenId];
+        uint256 len = bids.length;
+        if (len == 0 || maxToProcess == 0) {
+            return;
+        }
+        uint256 processed;
+        uint256 removed;
+        while (processed < len && removed < maxToProcess) {
+            uint256 idx = processed;
+            if (!bids[idx].isActive) {
+                uint256 lastIndex = bids.length - 1;
+                if (idx != lastIndex) {
+                    BiddingLibrary.Bid memory moved = bids[lastIndex];
+                    bids[idx] = moved;
+                    // Update index for moved bidder
+                    bidIndexByBidder[moved.bidder][tokenId] = idx + 1; // 1-based index
+                }
+                bids.pop();
+                removed++;
+                len = bids.length;
+                // Do not increment processed here because we need to re-check the swapped-in element
+            } else {
+                processed++;
+            }
+        }
+        emit BidsPruned(tokenId, removed, bids.length);
+    }
+
 
     function acceptBid(
         uint256 tokenId,
@@ -458,7 +592,12 @@ contract PropertyMarketOptimized is ReentrancyGuard {
         );
 
         listing.status = uint8(PropertyStatus.SOLD);
-        bid.isActive = false;
+        if (bid.isActive) {
+            bid.isActive = false;
+            if (activeBidsCount[tokenId] > 0) {
+                activeBidsCount[tokenId] -= 1;
+            }
+        }
         bidIndexByBidder[bid.bidder][tokenId] = 0;
 
         _processPaymentFromBalance(listing.seller, bid.amount, bid.paymentToken);
@@ -466,11 +605,29 @@ contract PropertyMarketOptimized is ReentrancyGuard {
 
         emit PropertySold(tokenId, bid.bidder, bid.amount, bid.paymentToken, true);
 
-        BiddingLibrary.cancelOtherBids(bidsForToken[tokenId], bidIndexByBidder, tokenId, bid.bidder, refundableBalances);
+        BiddingLibrary.cancelOtherBids(bidsForToken[tokenId], bidIndexByBidder, tokenId, bid.bidder, refundableBalances, activeBidsCount);
+        // MA2-23 Fix: Reset highest bid to 0 after sale (all bids cancelled or accepted)
+        highestActiveBidAmount[tokenId] = 0;
     }
 
     function cancelBid(uint256 tokenId) external nonReentrant whenSystemActive whenFunctionActive(FN_CANCEL_BID) {
-        BiddingLibrary.cancelBid(bidsForToken[tokenId], bidIndexByBidder, tokenId, msg.sender, refundableBalances);
+        BiddingLibrary.cancelBid(bidsForToken[tokenId], bidIndexByBidder, tokenId, msg.sender, refundableBalances, activeBidsCount);
+        // MA2-23 Fix: Recalculate highest active bid after cancellation
+        _recalculateHighestBid(tokenId);
+    }
+
+    /// @notice MA2-23 Fix: Internal helper to recalculate highest active bid for O(1) queries
+    /// @dev This function iterates through all bids but is only called after bid cancellation
+    function _recalculateHighestBid(uint256 tokenId) internal {
+        BiddingLibrary.Bid[] storage bids = bidsForToken[tokenId];
+        uint256 highest = 0;
+        uint256 length = bids.length;
+        for (uint256 i = 0; i < length; i++) {
+            if (bids[i].isActive && bids[i].amount > highest) {
+                highest = bids[i].amount;
+            }
+        }
+        highestActiveBidAmount[tokenId] = highest;
     }
 
     // ========== Payment Processing ==========
@@ -517,6 +674,7 @@ contract PropertyMarketOptimized is ReentrancyGuard {
         require(amount > 0, ErrorCodes.E001);
         refundableBalances[msg.sender][paymentToken] = 0;
         IERC20(paymentToken).safeTransfer(msg.sender, amount);
+        emit RefundClaimed(msg.sender, paymentToken, amount);
     }
 
 
@@ -547,8 +705,9 @@ contract PropertyMarketOptimized is ReentrancyGuard {
         );
     }
 
+    // MA2-23 Fix: Use O(1) lookup instead of O(n) iteration
     function getHighestBid(uint256 tokenId) external view returns (uint256) {
-        return BiddingLibrary.getHighestActiveBid(bidsForToken[tokenId]);
+        return highestActiveBidAmount[tokenId];
     }
 
     // ========== Admin Functions ==========

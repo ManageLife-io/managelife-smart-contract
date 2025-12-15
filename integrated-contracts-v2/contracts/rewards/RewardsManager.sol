@@ -21,6 +21,11 @@ contract RewardsManager is AccessControl, ReentrancyGuard {
     // Constants
     uint256 public constant BPS_DENOMINATOR = 10_000; // 100% = 10000 bps
     uint256 public constant MONTH_SECONDS = 30 days; // simplified month bucket
+    // Timelock governance
+    address public timelock;
+    event TimelockSet(address indexed oldTimelock, address indexed newTimelock);
+    event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
+
 
     // Default rates (bps)
     struct Rates {
@@ -65,6 +70,24 @@ contract RewardsManager is AccessControl, ReentrancyGuard {
             ownerContribTopUpBps: 1500,    // 15%
             buyerPurchaseRewardBps: 100,   // 1%
             buyerTxRebateBps: 100,         // 1%
+
+    modifier onlyTimelock() {
+        require(msg.sender == timelock, "Timelock required");
+        _;
+    }
+
+    /// @notice Set the TimelockController address that must execute sensitive operations
+    /// @dev Can be set once by DEFAULT_ADMIN_ROLE; subsequent updates must be performed by the timelock itself
+    function setTimelock(address newTimelock) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newTimelock != address(0), "Invalid timelock");
+        address old = timelock;
+        if (old != address(0)) {
+            require(msg.sender == old, "Only timelock can change");
+        }
+        timelock = newTimelock;
+        emit TimelockSet(old, newTimelock);
+    }
+
             referralMinBps: 100,           // 1%
             referralMaxBps: 200,           // 2%
             monthlyGasRebate: 100 ether    // 100 MLIFE (18 decimals)
@@ -82,9 +105,24 @@ contract RewardsManager is AccessControl, ReentrancyGuard {
     bytes32 private constant TAG_REFERRAL = keccak256("REFERRAL");
     bytes32 private constant TAG_ENGAGE = keccak256("ENGAGE");
 
+    /// @notice Transfer DEFAULT_ADMIN_ROLE and REWARD_MANAGER role to a new admin (governance-controlled)
+    /// @dev Only callable by timelock to enforce multisig/governance control
+    function setAdmin(address newAdmin) external onlyTimelock {
+        require(newAdmin != address(0), "zero admin");
+        // Find an existing admin to revoke; for simplicity, revoke msg.sender if it has admin, and grant new one
+        // In practice, governance can manage roles externally too.
+        address previousAdmin = address(0);
+        // NOTE: AccessControl does not expose enumeration by default; previous admin tracking is off-chain
+        // We emit event with previousAdmin as 0 if unknown.
+        _grantRole(DEFAULT_ADMIN_ROLE, newAdmin);
+        _grantRole(REWARD_MANAGER, newAdmin);
+        emit AdminTransferred(previousAdmin, newAdmin);
+    }
+
+
 
     // ========================= Admin =========================
-    function setRates(Rates calldata newRates) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setRates(Rates calldata newRates) external onlyTimelock {
         require(newRates.referralMinBps <= newRates.referralMaxBps, "ref bps range");
         require(newRates.renterCashbackBps <= BPS_DENOMINATOR, "renter bps");
         require(newRates.ownerRentTopUpBps <= BPS_DENOMINATOR, "owner bps");
@@ -100,7 +138,7 @@ contract RewardsManager is AccessControl, ReentrancyGuard {
         emit TokensFunded(msg.sender, amount);
     }
 
-    function rescue(address to, uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function rescue(address to, uint256 amount) external onlyTimelock {
         lifeToken.safeTransfer(to, amount);
         emit TokensRescued(to, amount);
     }

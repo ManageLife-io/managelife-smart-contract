@@ -60,7 +60,8 @@ library BiddingLibrary {
         Bid[] storage bids,
         mapping(address => mapping(uint256 => uint256)) storage bidIndexByBidder,
         uint256 tokenId,
-        mapping(address => mapping(address => uint256)) storage refundableBalances
+        mapping(address => mapping(address => uint256)) storage refundableBalances,
+        mapping(uint256 => uint256) storage activeBidsCount
     ) internal {
         uint256 length = bids.length;
         for (uint256 i = 0; i < length; i++) {
@@ -71,7 +72,9 @@ library BiddingLibrary {
 
                 bids[i].isActive = false;
                 bidIndexByBidder[bidder][tokenId] = 0;
-                
+                if (activeBidsCount[tokenId] > 0) {
+                    activeBidsCount[tokenId] -= 1;
+                }
                 refundableBalances[bidder][paymentToken] += refundAmount;
                 emit BidCancelled(tokenId, bidder, refundAmount);
             }
@@ -90,7 +93,8 @@ library BiddingLibrary {
         mapping(address => mapping(uint256 => uint256)) storage bidIndexByBidder,
         uint256 tokenId,
         address excludeBidder,
-        mapping(address => mapping(address => uint256)) storage refundableBalances
+        mapping(address => mapping(address => uint256)) storage refundableBalances,
+        mapping(uint256 => uint256) storage activeBidsCount
     ) internal {
         uint256 length = bids.length;
         for (uint256 i = 0; i < length; i++) {
@@ -101,7 +105,9 @@ library BiddingLibrary {
 
                 bids[i].isActive = false;
                 bidIndexByBidder[bidder][tokenId] = 0;
-                
+                if (activeBidsCount[tokenId] > 0) {
+                    activeBidsCount[tokenId] -= 1;
+                }
                 refundableBalances[bidder][paymentToken] += refundAmount;
                 emit BidCancelled(tokenId, bidder, refundAmount);
             }
@@ -198,7 +204,8 @@ library BiddingLibrary {
         mapping(address => mapping(uint256 => uint256)) storage bidIndexByBidder,
         uint256 tokenId,
         address bidder,
-        mapping(address => mapping(address => uint256)) storage refundableBalances
+        mapping(address => mapping(address => uint256)) storage refundableBalances,
+        mapping(uint256 => uint256) storage activeBidsCount
     ) internal {
         uint256 bidIndex = bidIndexByBidder[bidder][tokenId];
         require(bidIndex > 0, ErrorCodes.E201);
@@ -213,6 +220,9 @@ library BiddingLibrary {
         bid.isActive = false;
         bidIndexByBidder[bidder][tokenId] = 0;
 
+        if (activeBidsCount[tokenId] > 0) {
+            activeBidsCount[tokenId] -= 1;
+        }
         refundableBalances[bidder][paymentToken] += refundAmount;
         emit BidCancelled(tokenId, bidder, refundAmount);
     }
