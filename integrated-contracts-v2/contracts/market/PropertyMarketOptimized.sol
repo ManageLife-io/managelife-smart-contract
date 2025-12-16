@@ -259,7 +259,7 @@ contract PropertyMarketOptimized is ReentrancyGuard {
         uint256 tokenId,
         uint256 newPrice,
         address newPaymentToken
-    ) external whenSystemActive whenFunctionActive(FN_LIST) {
+    ) external nonReentrant whenSystemActive whenFunctionActive(FN_LIST) {
         PropertyListing storage listing = listings[tokenId];
         require(
             newPrice > 0 &&
@@ -269,8 +269,11 @@ contract PropertyMarketOptimized is ReentrancyGuard {
             ErrorCodes.E001
         );
 
-        // Update seller if ownership changed
+        // MA2-24 Fix: When ownership changed, cancel all bids (consistent with _listPropertyInternal)
+        // This ensures bids placed under previous seller's context are invalidated
         if (listing.seller != msg.sender) {
+            BiddingLibrary.cancelAllBids(bidsForToken[tokenId], bidIndexByBidder, tokenId, refundableBalances, activeBidsCount);
+            highestActiveBidAmount[tokenId] = 0;
             listing.seller = msg.sender;
         }
 
@@ -506,6 +509,8 @@ contract PropertyMarketOptimized is ReentrancyGuard {
         require(bidsForToken[tokenId].length < maxBidsArrayLengthPerToken, ErrorCodes.E502);
 
         require(activeBidsCount[tokenId] < maxActiveBidsPerToken, ErrorCodes.E502);
+
+        // MA2-25 Fix: Pass highestActiveBidAmount for O(1) validation instead of O(n) iteration
         BiddingLibrary.placeBid(
             bidsForToken[tokenId],
             bidIndexByBidder,
@@ -513,7 +518,8 @@ contract PropertyMarketOptimized is ReentrancyGuard {
             msg.sender,
             bidAmount,
             paymentToken,
-            listing.price
+            listing.price,
+            highestActiveBidAmount[tokenId]  // MA2-25: O(1) highest bid lookup
         );
         if (existingIndex == 0) {
             activeBidsCount[tokenId] += 1;

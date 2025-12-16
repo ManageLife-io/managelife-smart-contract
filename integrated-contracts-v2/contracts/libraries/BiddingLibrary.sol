@@ -115,29 +115,30 @@ library BiddingLibrary {
     }
 
     /**
-     * @notice Validate a new bid amount
-     * @param bids Array of bids for the token
+     * @notice Validate a new bid amount using O(1) lookup
+     * @dev MA2-25 Fix: Uses pre-computed highest bid instead of O(n) iteration
      * @param bidAmount The new bid amount
      * @param listingPrice The listing price
+     * @param currentHighestBid The pre-computed highest active bid amount
      * @return isValid Whether the bid is valid
      */
-    function validateBidAmount(
-        Bid[] storage bids,
+    function validateBidAmountOptimized(
         uint256 bidAmount,
-        uint256 listingPrice
-    ) internal view returns (bool isValid) {
+        uint256 listingPrice,
+        uint256 currentHighestBid
+    ) internal pure returns (bool isValid) {
         require(bidAmount >= listingPrice, ErrorCodes.E206);
-        
-        uint256 highestBid = getHighestActiveBid(bids);
-        if (highestBid > 0) {
-            require(bidAmount >= highestBid, ErrorCodes.E205);
+
+        if (currentHighestBid > 0) {
+            require(bidAmount >= currentHighestBid, ErrorCodes.E205);
         }
-        
+
         return true;
     }
 
     /**
-     * @notice Process a bid placement or update
+     * @notice Process a bid placement or update with O(1) validation
+     * @dev MA2-25 Fix: Uses currentHighestBid parameter instead of O(n) iteration
      * @param bids Array of bids for the token
      * @param bidIndexByBidder Mapping of bidder to bid index
      * @param tokenId The token ID
@@ -145,6 +146,7 @@ library BiddingLibrary {
      * @param bidAmount The bid amount
      * @param paymentToken The payment token address
      * @param listingPrice The listing price
+     * @param currentHighestBid The pre-computed highest active bid amount
      */
     function placeBid(
         Bid[] storage bids,
@@ -153,10 +155,11 @@ library BiddingLibrary {
         address bidder,
         uint256 bidAmount,
         address paymentToken,
-        uint256 listingPrice
+        uint256 listingPrice,
+        uint256 currentHighestBid
     ) internal {
-        // Validate bid amount
-        validateBidAmount(bids, bidAmount, listingPrice);
+        // MA2-25 Fix: Use O(1) validation with pre-computed highest bid
+        validateBidAmountOptimized(bidAmount, listingPrice, currentHighestBid);
 
         uint256 existingBidIndex = bidIndexByBidder[bidder][tokenId];
         
