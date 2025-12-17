@@ -505,6 +505,9 @@ contract PropertyMarketOptimized is ReentrancyGuard {
             ErrorCodes.E001
         );
 
+        // MA2-26 Fix: Ensure bid payment token matches listing's configured payment token
+        require(paymentToken == listing.paymentToken, ErrorCodes.E302);
+
         uint256 existingIndex = bidIndexByBidder[msg.sender][tokenId];
         require(bidsForToken[tokenId].length < maxBidsArrayLengthPerToken, ErrorCodes.E502);
 
