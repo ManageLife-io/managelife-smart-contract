@@ -226,10 +226,22 @@ contract PropertyMarketOptimized is ReentrancyGuard {
         // Cancel bids if listing exists and seller changed
         if (existingListing.seller != address(0) &&
             existingListing.seller != msg.sender &&
-            existingListing.status == uint8(PropertyStatus.LISTED)) {
+            (existingListing.status == uint8(PropertyStatus.LISTED) ||
+             existingListing.status == uint8(PropertyStatus.PENDING_SELLER_CONFIRMATION))) {
+            // MA2-27 Fix: Also handle PENDING_SELLER_CONFIRMATION status when seller changes
             BiddingLibrary.cancelAllBids(bidsForToken[tokenId], bidIndexByBidder, tokenId, refundableBalances, activeBidsCount);
             // MA2-23 Fix: Reset highest bid to 0 after cancelling all bids
             highestActiveBidAmount[tokenId] = 0;
+
+            // MA2-27 Fix: Clean up pending purchase if exists
+            if (existingListing.status == uint8(PropertyStatus.PENDING_SELLER_CONFIRMATION)) {
+                PendingPurchase storage pendingPurchase = pendingPurchases[tokenId];
+                if (pendingPurchase.isActive) {
+                    // Refund the buyer's locked funds
+                    refundableBalances[pendingPurchase.buyer][pendingPurchase.paymentToken] += pendingPurchase.offerPrice;
+                    pendingPurchase.isActive = false;
+                }
+            }
         } else if (existingListing.seller == msg.sender) {
             require(existingListing.status != uint8(PropertyStatus.LISTED), ErrorCodes.E102);
             // MA2-21 Fix: Prevent relisting while purchase is pending confirmation
