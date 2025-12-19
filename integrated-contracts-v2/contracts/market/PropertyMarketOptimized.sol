@@ -746,8 +746,13 @@ contract PropertyMarketOptimized is ReentrancyGuard {
             ErrorCodes.E103
         );
 
-        listing.price = newPrice;
+        // MA2-28 Fix: Prevent payment token change while active bids exist
+        // Existing bids were placed with the previous payment token, changing it would cause settlement inconsistency
+        if (newPaymentToken != listing.paymentToken) {
+            require(activeBidsCount[tokenId] == 0, ErrorCodes.E911);
+        }
 
+        listing.price = newPrice;
         listing.paymentToken = newPaymentToken;
         listing.lastRenewed = uint64(block.timestamp);
 
